@@ -1,56 +1,61 @@
 blueprint:
-  name: "ТВ: действие при просмотре канала или программы"
+  name: "ТВ: действие на выбранном канале по программе или времени"
   description: >-
-    Выполняет выбранное действие, когда телевизор включён и название канала
-    или программы совпадает с одним из заданных значений. Можно ограничить
-    работу временным интервалом, в том числе проходящим через полночь.
+    Выполняет выбранные команды, если телевизор показывает заданный канал,
+    а отдельная сущность сообщает о нужной передаче и/или текущее время входит
+    в заданный интервал. Перед выполнением канал должен оставаться неизменным
+    указанное число секунд — это защищает от ложных срабатываний при
+    перелистывании каналов.
 
-    Источником названия может быть состояние sensor/media_player либо любой
-    его атрибут (например media_title, media_channel или channel).
+    Пример для Apple TV: сущность media_player.apple_tv, атрибут media_title,
+    название канала «Телекомпания НТВ». В действиях можно отправить команды
+    home, menu, select и другие команды remote.send_command.
   domain: automation
   homeassistant:
     min_version: 2024.6.0
 
   input:
-    source_section:
-      name: "Что отслеживать"
-      icon: mdi:television-guide
+    tv_section:
+      name: "Телевизор и канал"
+      icon: mdi:television
       input:
         tv_power_entity:
           name: "Сущность состояния телевизора"
           description: >-
-            Media player или remote, по которому видно, что телевизор включён.
+            Media player или remote, по которому видно, что устройство включено.
+            Для Apple TV обычно выбирается его media_player.
           selector:
             entity:
               multiple: false
 
         content_entity:
-          name: "Сущность канала / программы"
+          name: "Сущность с текущим каналом"
           description: >-
-            Сенсор или media_player, содержащий текущий канал либо программу.
+            Например media_player Apple TV, у которого в media_title указано
+            «Телекомпания НТВ».
           selector:
             entity:
               multiple: false
 
         content_attribute:
-          name: "Атрибут с названием (необязательно)"
+          name: "Атрибут с названием канала"
           description: >-
-            Оставьте пустым, чтобы проверять состояние сущности. Примеры:
-            media_title, media_channel, channel.
-          default: ""
+            Для Apple TV обычно media_title. Оставьте пустым, чтобы проверять
+            основное состояние сущности.
+          default: media_title
           selector:
             text:
 
         target_names:
-          name: "Названия для срабатывания"
+          name: "Названия каналов"
           description: >-
-            Добавьте одно или несколько названий каналов/передач.
+            Одно или несколько названий, например «Телекомпания НТВ».
           selector:
             text:
               multiple: true
 
         match_mode:
-          name: "Способ сравнения"
+          name: "Сравнение названия канала"
           default: contains
           selector:
             select:
@@ -61,14 +66,85 @@ blueprint:
                 - label: "Полностью совпадает"
                   value: exact
 
-    time_section:
-      name: "Время"
-      icon: mdi:clock-outline
-      collapsed: true
+        channel_hold_seconds:
+          name: "Сколько секунд канал должен оставаться выбранным"
+          description: >-
+            Если во время задержки канал изменится, отсчёт будет отменён.
+            Это предотвращает срабатывание при быстром перелистывании каналов.
+          default: 10
+          selector:
+            number:
+              min: 0
+              max: 300
+              step: 1
+              unit_of_measurement: s
+              mode: box
+
+    activation_section:
+      name: "Когда разрешено срабатывание"
+      icon: mdi:calendar-clock
       input:
+        activation_mode:
+          name: "Условие запуска"
+          default: program_or_time
+          selector:
+            select:
+              mode: dropdown
+              options:
+                - label: "Нужная программа ИЛИ заданное время"
+                  value: program_or_time
+                - label: "Только нужная программа"
+                  value: program
+                - label: "Только заданное время"
+                  value: time
+                - label: "Нужная программа И заданное время"
+                  value: program_and_time
+
+        program_entity:
+          name: "Отдельная сущность телепрограммы (необязательно)"
+          description: >-
+            Сенсор с названием текущей передачи. Для режима «только время»
+            можно оставить пустым.
+          default: ""
+          selector:
+            entity:
+              multiple: false
+
+        program_attribute:
+          name: "Атрибут с названием передачи (необязательно)"
+          description: >-
+            Оставьте пустым, если название передачи является состоянием сенсора.
+          default: ""
+          selector:
+            text:
+
+        program_names:
+          name: "Названия передач"
+          description: >-
+            Одно или несколько названий. Для режима «только время» список
+            можно оставить пустым.
+          default: []
+          selector:
+            text:
+              multiple: true
+
+        program_match_mode:
+          name: "Сравнение названия передачи"
+          default: contains
+          selector:
+            select:
+              mode: dropdown
+              options:
+                - label: "Содержит текст"
+                  value: contains
+                - label: "Полностью совпадает"
+                  value: exact
+
         use_time_window:
           name: "Использовать временной интервал"
-          default: false
+          description: >-
+            Включите для режимов, в которых участвует время.
+          default: true
           selector:
             boolean:
 
@@ -80,6 +156,7 @@ blueprint:
 
         end_time:
           name: "Конец интервала"
+          description: "Поддерживается интервал через полночь, например 23:00–01:00."
           default: "23:59:59"
           selector:
             time:
@@ -87,7 +164,7 @@ blueprint:
         cooldown_minutes:
           name: "Не повторять действие, минут"
           description: >-
-            Защищает от повторов при частом обновлении атрибутов программы.
+            Защищает от повторного выполнения при обновлении сущностей.
           default: 5
           selector:
             number:
@@ -98,18 +175,18 @@ blueprint:
               mode: box
 
     action_section:
-      name: "Действие"
+      name: "Команды"
       icon: mdi:remote-tv
       input:
         action_to_run:
           name: "Что выполнить"
           description: >-
-            Например remote.send_command, media_player.play_media,
-            media_player.select_source или запуск скрипта.
+            Добавьте одну или несколько команд. Для Apple TV, например:
+            remote.send_command с командами home, menu или select.
           selector:
             action:
 
-mode: single
+mode: restart
 max_exceeded: silent
 
 variables:
@@ -118,34 +195,63 @@ variables:
   content_attribute: !input content_attribute
   target_names: !input target_names
   match_mode: !input match_mode
+  activation_mode: !input activation_mode
+  program_entity: !input program_entity
+  program_attribute: !input program_attribute
+  program_names: !input program_names
+  program_match_mode: !input program_match_mode
   use_time_window: !input use_time_window
   start_time: !input start_time
   end_time: !input end_time
   cooldown_minutes: !input cooldown_minutes
 
+trigger_variables:
+  watched_program_entity: !input program_entity
+  watched_program_attribute: !input program_attribute
+  watched_program_names: !input program_names
+  watched_program_match_mode: !input program_match_mode
+
 trigger:
   - platform: state
     entity_id: !input content_entity
-    id: content_changed
+    attribute: !input content_attribute
+    id: channel_changed
 
   - platform: state
     entity_id: !input tv_power_entity
     id: tv_changed
 
+  - platform: template
+    id: program_started
+    value_template: >-
+      {% if watched_program_entity | string | length == 0 %}
+        false
+      {% else %}
+        {% set raw = state_attr(watched_program_entity, watched_program_attribute)
+           if watched_program_attribute | string | length > 0
+           else states(watched_program_entity) %}
+        {% set current = raw | default('', true) | string | trim | lower %}
+        {% set ns = namespace(found=false) %}
+        {% for item in watched_program_names %}
+          {% set wanted = item | string | trim | lower %}
+          {% if wanted | length > 0 and
+                ((watched_program_match_mode == 'exact' and current == wanted) or
+                 (watched_program_match_mode == 'contains' and wanted in current)) %}
+            {% set ns.found = true %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.found }}
+      {% endif %}
+
   - platform: time
     at: !input start_time
-    id: window_start
+    id: window_started
 
   - platform: homeassistant
     event: start
-    id: home_assistant_start
+    id: home_assistant_started
 
 condition:
-  - condition: template
-    alias: "Не запускать ежедневный триггер времени, если интервал отключён"
-    value_template: >-
-      {{ trigger.id != 'window_start' or use_time_window }}
-
   - condition: template
     alias: "Телевизор включён"
     value_template: >-
@@ -153,34 +259,50 @@ condition:
          not in ['off', 'unavailable', 'unknown', 'standby', 'none'] }}
 
   - condition: template
-    alias: "Текущее время входит в интервал"
+    alias: "Сейчас выбран нужный канал"
     value_template: >-
-      {% if not use_time_window %}
-        true
-      {% else %}
-        {% set current = now().strftime('%H:%M:%S') %}
-        {% set start = (start_time | string)[:8] %}
-        {% set end = (end_time | string)[:8] %}
-        {{ (start <= end and start <= current < end)
-           or (start > end and (current >= start or current < end)) }}
-      {% endif %}
-
-  - condition: template
-    alias: "Канал или программа совпадает"
-    value_template: >-
-      {% set raw_value = state_attr(content_entity, content_attribute)
+      {% set raw = state_attr(content_entity, content_attribute)
          if content_attribute | length > 0 else states(content_entity) %}
-      {% set current_value = raw_value | default('', true) | string | trim | lower %}
+      {% set current = raw | default('', true) | string | trim | lower %}
       {% set ns = namespace(found=false) %}
       {% for item in target_names %}
         {% set wanted = item | string | trim | lower %}
         {% if wanted | length > 0 and
-              ((match_mode == 'exact' and current_value == wanted) or
-               (match_mode == 'contains' and wanted in current_value)) %}
+              ((match_mode == 'exact' and current == wanted) or
+               (match_mode == 'contains' and wanted in current)) %}
           {% set ns.found = true %}
         {% endif %}
       {% endfor %}
       {{ ns.found }}
+
+  - condition: template
+    alias: "Совпала программа и/или время"
+    value_template: >-
+      {% set raw_program = state_attr(program_entity, program_attribute)
+         if program_entity | length > 0 and program_attribute | length > 0
+         else states(program_entity) if program_entity | length > 0 else '' %}
+      {% set current_program = raw_program | default('', true) | string | trim | lower %}
+      {% set ns = namespace(program_ok=false) %}
+      {% for item in program_names %}
+        {% set wanted = item | string | trim | lower %}
+        {% if wanted | length > 0 and
+              ((program_match_mode == 'exact' and current_program == wanted) or
+               (program_match_mode == 'contains' and wanted in current_program)) %}
+          {% set ns.program_ok = true %}
+        {% endif %}
+      {% endfor %}
+
+      {% set current_time = now().strftime('%H:%M:%S') %}
+      {% set start = (start_time | string)[:8] %}
+      {% set end = (end_time | string)[:8] %}
+      {% set time_ok = use_time_window and
+           ((start <= end and start <= current_time < end) or
+            (start > end and (current_time >= start or current_time < end))) %}
+
+      {{ (activation_mode == 'program' and ns.program_ok)
+         or (activation_mode == 'time' and time_ok)
+         or (activation_mode == 'program_or_time' and (ns.program_ok or time_ok))
+         or (activation_mode == 'program_and_time' and ns.program_ok and time_ok) }}
 
   - condition: template
     alias: "Истёк интервал защиты от повторов"
@@ -190,4 +312,64 @@ condition:
          (as_timestamp(now()) - as_timestamp(last)) >=
          cooldown_minutes | int(0) * 60 }}
 
-action: !input action_to_run
+action:
+  - alias: "Ждать, пока канал остаётся выбранным"
+    delay:
+      seconds: !input channel_hold_seconds
+
+  - condition: template
+    alias: "После задержки телевизор всё ещё включён"
+    value_template: >-
+      {{ states(tv_power_entity) | lower
+         not in ['off', 'unavailable', 'unknown', 'standby', 'none'] }}
+
+  - condition: template
+    alias: "После задержки канал не изменился"
+    value_template: >-
+      {% set raw = state_attr(content_entity, content_attribute)
+         if content_attribute | length > 0 else states(content_entity) %}
+      {% set current = raw | default('', true) | string | trim | lower %}
+      {% set ns = namespace(found=false) %}
+      {% for item in target_names %}
+        {% set wanted = item | string | trim | lower %}
+        {% if wanted | length > 0 and
+              ((match_mode == 'exact' and current == wanted) or
+               (match_mode == 'contains' and wanted in current)) %}
+          {% set ns.found = true %}
+        {% endif %}
+      {% endfor %}
+      {{ ns.found }}
+
+  - condition: template
+    alias: "После задержки программа и/или время всё ещё подходят"
+    value_template: >-
+      {% set raw_program = state_attr(program_entity, program_attribute)
+         if program_entity | length > 0 and program_attribute | length > 0
+         else states(program_entity) if program_entity | length > 0 else '' %}
+      {% set current_program = raw_program | default('', true) | string | trim | lower %}
+      {% set ns = namespace(program_ok=false) %}
+      {% for item in program_names %}
+        {% set wanted = item | string | trim | lower %}
+        {% if wanted | length > 0 and
+              ((program_match_mode == 'exact' and current_program == wanted) or
+               (program_match_mode == 'contains' and wanted in current_program)) %}
+          {% set ns.program_ok = true %}
+        {% endif %}
+      {% endfor %}
+
+      {% set current_time = now().strftime('%H:%M:%S') %}
+      {% set start = (start_time | string)[:8] %}
+      {% set end = (end_time | string)[:8] %}
+      {% set time_ok = use_time_window and
+           ((start <= end and start <= current_time < end) or
+            (start > end and (current_time >= start or current_time < end))) %}
+
+      {{ (activation_mode == 'program' and ns.program_ok)
+         or (activation_mode == 'time' and time_ok)
+         or (activation_mode == 'program_or_time' and (ns.program_ok or time_ok))
+         or (activation_mode == 'program_and_time' and ns.program_ok and time_ok) }}
+
+  - alias: "Выполнить выбранные команды"
+    choose:
+      - conditions: []
+        sequence: !input action_to_run
