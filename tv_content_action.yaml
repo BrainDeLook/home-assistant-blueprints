@@ -217,10 +217,6 @@ trigger:
     attribute: !input content_attribute
     id: channel_changed
 
-  - platform: state
-    entity_id: !input tv_power_entity
-    id: tv_changed
-
   - platform: template
     id: program_started
     value_template: >-
