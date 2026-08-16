@@ -1,0 +1,193 @@
+blueprint:
+  name: "ТВ: действие при просмотре канала или программы"
+  description: >-
+    Выполняет выбранное действие, когда телевизор включён и название канала
+    или программы совпадает с одним из заданных значений. Можно ограничить
+    работу временным интервалом, в том числе проходящим через полночь.
+
+    Источником названия может быть состояние sensor/media_player либо любой
+    его атрибут (например media_title, media_channel или channel).
+  domain: automation
+  homeassistant:
+    min_version: 2024.6.0
+
+  input:
+    source_section:
+      name: "Что отслеживать"
+      icon: mdi:television-guide
+      input:
+        tv_power_entity:
+          name: "Сущность состояния телевизора"
+          description: >-
+            Media player или remote, по которому видно, что телевизор включён.
+          selector:
+            entity:
+              multiple: false
+
+        content_entity:
+          name: "Сущность канала / программы"
+          description: >-
+            Сенсор или media_player, содержащий текущий канал либо программу.
+          selector:
+            entity:
+              multiple: false
+
+        content_attribute:
+          name: "Атрибут с названием (необязательно)"
+          description: >-
+            Оставьте пустым, чтобы проверять состояние сущности. Примеры:
+            media_title, media_channel, channel.
+          default: ""
+          selector:
+            text:
+
+        target_names:
+          name: "Названия для срабатывания"
+          description: >-
+            Добавьте одно или несколько названий каналов/передач.
+          selector:
+            text:
+              multiple: true
+
+        match_mode:
+          name: "Способ сравнения"
+          default: contains
+          selector:
+            select:
+              mode: dropdown
+              options:
+                - label: "Содержит текст"
+                  value: contains
+                - label: "Полностью совпадает"
+                  value: exact
+
+    time_section:
+      name: "Время"
+      icon: mdi:clock-outline
+      collapsed: true
+      input:
+        use_time_window:
+          name: "Использовать временной интервал"
+          default: false
+          selector:
+            boolean:
+
+        start_time:
+          name: "Начало интервала"
+          default: "18:00:00"
+          selector:
+            time:
+
+        end_time:
+          name: "Конец интервала"
+          default: "23:59:59"
+          selector:
+            time:
+
+        cooldown_minutes:
+          name: "Не повторять действие, минут"
+          description: >-
+            Защищает от повторов при частом обновлении атрибутов программы.
+          default: 5
+          selector:
+            number:
+              min: 0
+              max: 1440
+              step: 1
+              unit_of_measurement: min
+              mode: box
+
+    action_section:
+      name: "Действие"
+      icon: mdi:remote-tv
+      input:
+        action_to_run:
+          name: "Что выполнить"
+          description: >-
+            Например remote.send_command, media_player.play_media,
+            media_player.select_source или запуск скрипта.
+          selector:
+            action:
+
+mode: single
+max_exceeded: silent
+
+variables:
+  tv_power_entity: !input tv_power_entity
+  content_entity: !input content_entity
+  content_attribute: !input content_attribute
+  target_names: !input target_names
+  match_mode: !input match_mode
+  use_time_window: !input use_time_window
+  start_time: !input start_time
+  end_time: !input end_time
+  cooldown_minutes: !input cooldown_minutes
+
+trigger:
+  - platform: state
+    entity_id: !input content_entity
+    id: content_changed
+
+  - platform: state
+    entity_id: !input tv_power_entity
+    id: tv_changed
+
+  - platform: time
+    at: !input start_time
+    id: window_start
+
+  - platform: homeassistant
+    event: start
+    id: home_assistant_start
+
+condition:
+  - condition: template
+    alias: "Не запускать ежедневный триггер времени, если интервал отключён"
+    value_template: >-
+      {{ trigger.id != 'window_start' or use_time_window }}
+
+  - condition: template
+    alias: "Телевизор включён"
+    value_template: >-
+      {{ states(tv_power_entity) | lower
+         not in ['off', 'unavailable', 'unknown', 'standby', 'none'] }}
+
+  - condition: template
+    alias: "Текущее время входит в интервал"
+    value_template: >-
+      {% if not use_time_window %}
+        true
+      {% else %}
+        {% set current = now().strftime('%H:%M:%S') %}
+        {% set start = (start_time | string)[:8] %}
+        {% set end = (end_time | string)[:8] %}
+        {{ (start <= end and start <= current < end)
+           or (start > end and (current >= start or current < end)) }}
+      {% endif %}
+
+  - condition: template
+    alias: "Канал или программа совпадает"
+    value_template: >-
+      {% set raw_value = state_attr(content_entity, content_attribute)
+         if content_attribute | length > 0 else states(content_entity) %}
+      {% set current_value = raw_value | default('', true) | string | trim | lower %}
+      {% set ns = namespace(found=false) %}
+      {% for item in target_names %}
+        {% set wanted = item | string | trim | lower %}
+        {% if wanted | length > 0 and
+              ((match_mode == 'exact' and current_value == wanted) or
+               (match_mode == 'contains' and wanted in current_value)) %}
+          {% set ns.found = true %}
+        {% endif %}
+      {% endfor %}
+      {{ ns.found }}
+
+  - condition: template
+    alias: "Истёк интервал защиты от повторов"
+    value_template: >-
+      {% set last = this.attributes.last_triggered %}
+      {{ last is none or cooldown_minutes | int(0) == 0 or
+         (as_timestamp(now()) - as_timestamp(last)) >=
+         cooldown_minutes | int(0) * 60 }}
+
+action: !input action_to_run
