@@ -1,0 +1,218 @@
+blueprint:
+  name: "Dreame — свет в комнате с восстановлением"
+  description: >-
+    Создайте отдельную автоматизацию для каждой комнаты. После подтверждённого
+    въезда сохраняет состояние выбранных светильников и включает заданный свет.
+    После подтверждённого выезда восстанавливает снимок; на базе — без задержки.
+    Использует атрибуты current_segment, selected_map_id и docked сущности Dreame.
+    Выбирайте отдельные light-сущности, не группы. Не используйте один светильник
+    в нескольких таких автоматизациях. Снимки временные: перезапуск Home Assistant
+    или перезагрузка сцен удаляет их. Перед отключением или изменением автоматизации
+    дождитесь восстановления света. Ручные изменения во время присутствия робота
+    заменяются сохранённым состоянием при выезде.
+  domain: automation
+  source_url: https://github.com/BrainDeLook/home-assistant-blueprints/blob/main/dreame_room_light.yaml
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    vacuum:
+      name: Пылесос Dreame
+      selector:
+        entity:
+          filter:
+            - domain: vacuum
+    map_id:
+      name: ID карты
+      description: "Атрибут selected_map_id. Для присланной карты — 1."
+      default: 1
+      selector:
+        number:
+          min: 0
+          max: 2147483647
+          mode: box
+          step: 1
+    room_id:
+      name: ID комнаты
+      description: "Числовой id из атрибута rooms. Например, Офис — 1, Кухня — 6."
+      selector:
+        number:
+          min: 1
+          max: 2147483647
+          mode: box
+          step: 1
+    lights:
+      name: Светильники этой комнаты
+      description: Выберите отдельные сущности light. Состояние каждой сохраняется отдельно.
+      selector:
+        entity:
+          multiple: true
+          filter:
+            - domain: light
+    entry_delay:
+      name: Подтверждение въезда
+      description: "Робот должен непрерывно находиться в комнате это время. 0 — без задержки."
+      default: 3
+      selector:
+        number:
+          min: 0
+          max: 120
+          step: 1
+          unit_of_measurement: s
+          mode: box
+    exit_delay:
+      name: Подтверждение выезда
+      description: >-
+        Восстановление после непрерывного отсутствия в комнате. Краткий скачок
+        координат не сбрасывает свет. На базе эта задержка не применяется.
+      default: 3
+      selector:
+        number:
+          min: 0
+          max: 120
+          step: 1
+          unit_of_measurement: s
+          mode: box
+    brightness:
+      name: Яркость во время присутствия робота
+      default: 70
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+          unit_of_measurement: "%"
+          mode: slider
+    color_mode:
+      name: Режим света
+      description: Выберите режим, поддерживаемый всеми выбранными светильниками.
+      default: rgb
+      selector:
+        select:
+          options:
+            - label: Цвет RGB
+              value: rgb
+            - label: Белый — цветовая температура
+              value: temperature
+            - label: Только яркость — сохранить текущий цвет
+              value: brightness
+    color:
+      name: Цвет RGB
+      description: Используется только в режиме «Цвет RGB».
+      default: [0, 128, 255]
+      selector:
+        color_rgb: {}
+    temperature:
+      name: Температура белого света
+      description: Используется только в режиме цветовой температуры. Учитывайте диапазон ламп.
+      default: 4000
+      selector:
+        number:
+          min: 2000
+          max: 6500
+          step: 100
+          unit_of_measurement: K
+          mode: slider
+
+trigger_variables:
+  robot: !input vacuum
+  target_map: !input map_id
+  target_room: !input room_id
+
+triggers:
+  - trigger: template
+    id: entered
+    value_template: >-
+      {{ has_value(robot)
+         and state_attr(robot, 'docked') == false
+         and state_attr(robot, 'selected_map_id') | int(-1) == target_map
+         and state_attr(robot, 'current_segment') | int(-1) == target_room }}
+    for:
+      seconds: !input entry_delay
+  - trigger: template
+    id: left
+    value_template: >-
+      {{ not (has_value(robot)
+         and state_attr(robot, 'docked') == false
+         and state_attr(robot, 'selected_map_id') | int(-1) == target_map
+         and state_attr(robot, 'current_segment') | int(-1) == target_room) }}
+    for:
+      seconds: !input exit_delay
+  - trigger: template
+    id: docked
+    value_template: "{{ state_attr(robot, 'docked') == true }}"
+
+variables:
+  room_lights: !input lights
+  light_mode: !input color_mode
+  snapshot_id: "{{ 'dreame_room_before_' ~ this.entity_id.split('.')[1] }}"
+  snapshot_entity: "{{ 'scene.' ~ snapshot_id }}"
+
+# Последовательные короткие действия: новый триггер не прерывает сохранение
+# или восстановление. Снимок служит признаком того, что свет уже изменён.
+mode: queued
+max: 10
+
+actions:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ has_value(robot)
+                 and state_attr(robot, 'docked') == false
+                 and state_attr(robot, 'selected_map_id') | int(-1) == target_map
+                 and state_attr(robot, 'current_segment') | int(-1) == target_room }}
+        sequence:
+          - condition: trigger
+            id: entered
+          # Не перезаписывать исходный снимок при дребезге на границе комнаты.
+          - condition: template
+            value_template: "{{ state_attr(snapshot_entity, 'entity_id') is none }}"
+          # Не сохранять unavailable/unknown вместо реального состояния света.
+          - variables:
+              available_light_states: "{{ expand(room_lights) | map(attribute='state') | list }}"
+          - condition: template
+            value_template: >-
+              {{ room_lights | count > 0
+                 and available_light_states | count == room_lights | count
+                 and available_light_states | reject('in', ['on', 'off']) | list | count == 0 }}
+          - action: scene.create
+            data:
+              scene_id: "{{ snapshot_id }}"
+              snapshot_entities: !input lights
+          # scene.create добавляет сущность асинхронно: дождаться регистрации.
+          - wait_template: "{{ state_attr(snapshot_entity, 'entity_id') is not none }}"
+            timeout:
+              seconds: 5
+            continue_on_timeout: false
+          - choose:
+              - conditions: "{{ light_mode == 'rgb' }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      brightness_pct: !input brightness
+                      rgb_color: !input color
+              - conditions: "{{ light_mode == 'temperature' }}"
+                sequence:
+                  - action: light.turn_on
+                    target:
+                      entity_id: !input lights
+                    data:
+                      brightness_pct: !input brightness
+                      color_temp_kelvin: !input temperature
+            default:
+              - action: light.turn_on
+                target:
+                  entity_id: !input lights
+                data:
+                  brightness_pct: !input brightness
+    default:
+      - condition: template
+        value_template: "{{ state_attr(snapshot_entity, 'entity_id') is not none }}"
+      - action: scene.turn_on
+        target:
+          entity_id: "{{ snapshot_entity }}"
+      - action: scene.delete
+        target:
+          entity_id: "{{ snapshot_entity }}"
