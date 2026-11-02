@@ -1,0 +1,379 @@
+blueprint:
+  name: "Dreame — свет во всех комнатах"
+  description: >-
+    Одна автоматизация для всей квартиры. Выберите пылесос, добавьте комнаты
+    кнопкой добавления и выберите светильники. Названия комнат берите с карты
+    приложения Dreame; ID комнат и карты вводить не нужно. Для каждой комнаты
+    можно задать свой цвет и яркость, а незаполненные настройки берутся из общих.
+    Свет меняется после подтверждения перехода и восстанавливается при выезде.
+    На базе восстанавливается сразу, включая промежуточную мойку.
+    После сохранения нажмите «Выполнить действия»: уведомление покажет найденные
+    комнаты и проверит настройки, не меняя свет. Требуется Home Assistant 2026.9+.
+    Снимки временные: перезапуск HA или перезагрузка сцен удаляет их.
+  domain: automation
+  source_url: https://github.com/BrainDeLook/home-assistant-blueprints/blob/main/dreame_room_lights.yaml
+  homeassistant:
+    min_version: "2026.9.0"
+  input:
+    setup:
+      name: "1. Пылесос и комнаты"
+      icon: mdi:robot-vacuum
+      input:
+        vacuum:
+          name: Пылесос Dreame
+          selector:
+            entity:
+              filter:
+                - domain: vacuum
+        room_bindings:
+          name: Комнаты и светильники
+          description: >-
+            Добавляйте комнаты в этот список. Название должно совпадать с картой
+            в приложении Dreame; регистр букв и пробелы по краям не важны.
+            Выберите отдельные light-сущности, не группы. Необязательные поля
+            можно оставить пустыми — применятся общие настройки из раздела 3.
+            Один светильник используйте только в одной записи.
+          default: []
+          selector:
+            object:
+              multiple: true
+              label_field: room
+              fields:
+                room:
+                  label: Название комнаты в приложении Dreame
+                  required: true
+                  selector:
+                    text: {}
+                lights:
+                  label: Светильники этой комнаты
+                  required: true
+                  selector:
+                    entity:
+                      multiple: true
+                      filter:
+                        - domain: light
+                brightness:
+                  label: Яркость — необязательно
+                  selector:
+                    number:
+                      min: 1
+                      max: 100
+                      step: 1
+                      unit_of_measurement: "%"
+                      mode: slider
+                mode:
+                  label: Режим света — необязательно
+                  selector:
+                    select:
+                      options:
+                        - label: Цвет RGB
+                          value: rgb
+                        - label: Температура белого
+                          value: temperature
+                        - label: Только яркость
+                          value: brightness
+                color:
+                  label: Цвет RGB — необязательно
+                  selector:
+                    color_rgb: {}
+                temperature:
+                  label: Температура белого — необязательно
+                  selector:
+                    number:
+                      min: 2000
+                      max: 6500
+                      step: 100
+                      unit_of_measurement: K
+                      mode: slider
+    timing:
+      name: "2. Защита от скачков между комнатами"
+      icon: mdi:timer-outline
+      input:
+        room_delay:
+          name: Задержка смены комнаты
+          description: >-
+            Свет переключится, когда положение робота не меняется это время.
+            Короткий скачок в соседнюю комнату игнорируется: прежний свет остаётся.
+            После подтверждения старый свет восстанавливается, затем включается
+            новый. 0 — переключать сразу. На базе задержка не применяется.
+          default: 3
+          selector:
+            number:
+              min: 0
+              max: 120
+              step: 1
+              unit_of_measurement: s
+              mode: box
+    defaults:
+      name: "3. Общий свет — если в комнате не указано своё"
+      icon: mdi:lightbulb-group
+      collapsed: true
+      input:
+        default_brightness:
+          name: Яркость
+          default: 70
+          selector:
+            number:
+              min: 1
+              max: 100
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+        default_mode:
+          name: Режим света
+          description: Выберите режим, поддерживаемый вашими светильниками.
+          default: rgb
+          selector:
+            select:
+              options:
+                - label: Цвет RGB
+                  value: rgb
+                - label: Температура белого
+                  value: temperature
+                - label: Только яркость
+                  value: brightness
+        default_color:
+          name: Цвет RGB
+          default: [0, 128, 255]
+          selector:
+            color_rgb: {}
+        default_temperature:
+          name: Температура белого
+          default: 4000
+          selector:
+            number:
+              min: 2000
+              max: 6500
+              step: 100
+              unit_of_measurement: K
+              mode: slider
+
+triggers:
+  - trigger: state
+    entity_id: !input vacuum
+    attribute: current_segment
+  - trigger: state
+    entity_id: !input vacuum
+    attribute: selected_map
+  - trigger: state
+    entity_id: !input vacuum
+    attribute: selected_map_id
+  - trigger: state
+    entity_id: !input vacuum
+    attribute: docked
+  - trigger: state
+    entity_id: !input vacuum
+    to:
+      - unknown
+      - unavailable
+  - trigger: state
+    entity_id: !input vacuum
+    from:
+      - unknown
+      - unavailable
+  - trigger: homeassistant
+    event: start
+
+variables:
+  robot: !input vacuum
+  configured_rooms: !input room_bindings
+  settle_seconds: !input room_delay
+  base_brightness: !input default_brightness
+  base_mode: !input default_mode
+  base_color: !input default_color
+  base_temperature: !input default_temperature
+  scene_prefix: "{{ 'dreame_rooms_' ~ this.entity_id.split('.')[1] ~ '_' }}"
+  notification_id: "{{ 'dreame_rooms_setup_' ~ this.entity_id.split('.')[1] }}"
+  # Поля формы проверяет object-selector. Здесь один раз подставляются общие
+  # настройки для необязательных полей; далее используется единая структура.
+  bindings: >-
+    {% set ns = namespace(items=[]) %}
+    {% for item in configured_rooms %}
+      {% set ns.items = ns.items + [dict(
+        name=item.room | trim | lower,
+        label=item.room | trim,
+        lights=item.lights,
+        brightness=item.get('brightness', base_brightness),
+        mode=item.get('mode', base_mode),
+        color=item.get('color', base_color),
+        temperature=item.get('temperature', base_temperature),
+        snapshot='scene.' ~ scene_prefix ~ loop.index)] %}
+    {% endfor %}
+    {{ ns.items }}
+
+# Одна выполняемая операция и одна ожидающая: во время ожидания сам цикл
+# отслеживает все изменения позиции. Восстановление/снимок не прерываются.
+mode: queued
+max: 2
+max_exceeded: silent
+
+actions:
+  # Ручной запуск только показывает диагностику, не имитирует въезд.
+  - if: "{{ trigger is not defined or trigger is none or trigger.platform is none }}"
+    then:
+      - action: persistent_notification.create
+        data:
+          notification_id: "{{ notification_id }}"
+          title: "Dreame — проверка комнат"
+          message: >-
+            {% set tables = state_attr(robot, 'rooms') or {} %}
+            {% set ns = namespace(names=[], used=[], errors=[]) %}
+            **Комнаты из пылесоса:**
+            {% if tables is mapping and tables | count > 0 %}
+              {% for map_name, rooms in tables.items() %}
+            {{ '\n' }}**{{ map_name }}:** {{ rooms | map(attribute='name') | join(', ') }}.
+                {% for room in rooms %}
+                  {% set ns.names = ns.names + [room.name | trim | lower] %}
+                {% endfor %}
+              {% endfor %}
+            {% else %}
+            {{ '\n' }}Карта пока недоступна. Убедитесь, что выбран Dreame и его карта загружена.
+            {% endif %}
+            {{ '\n\n' }}**Ваши настройки:**
+            {% for item in bindings %}
+              {% set found = item.name in ns.names %}
+            {{ '\n' }}- {{ item.label }}: {{ 'найдена' if found else 'НЕ НАЙДЕНА — проверьте название' }};
+            {{ item.lights | count }} светильников, {{ item.brightness }}%.
+              {% for light in item.lights %}
+                {% if light in ns.used %}
+                  {% set ns.errors = ns.errors + [light ~ ' указан несколько раз'] %}
+                {% endif %}
+                {% set ns.used = ns.used + [light] %}
+              {% endfor %}
+            {% else %}
+            {{ '\n' }}Добавьте комнаты в настройках автоматизации.
+            {% endfor %}
+            {% if ns.errors %}{{ '\n\n' }}{{ ns.errors | join('; ') }}.{% endif %}
+            {{ '\n\n' }}Свет не изменён. Названия можно скопировать отсюда; ID не нужны.
+      - stop: Проверка завершена — смотрите уведомление Home Assistant.
+
+  # Единый debounce для комнаты, карты и базы. Любое изменение сбрасывает
+  # отсчёт; база прерывает ожидание сразу. Никаких отмен во время scene/light.
+  - if: "{{ settle_seconds > 0 and state_attr(robot, 'docked') != true }}"
+    then:
+      - repeat:
+          sequence:
+            - variables:
+                observed_position: >-
+                  {{ [has_value(robot), state_attr(robot, 'current_segment'),
+                      state_attr(robot, 'selected_map_id'), state_attr(robot, 'selected_map'),
+                      state_attr(robot, 'docked')] }}
+            - wait_template: >-
+                {{ state_attr(robot, 'docked') == true or
+                   [has_value(robot), state_attr(robot, 'current_segment'),
+                    state_attr(robot, 'selected_map_id'), state_attr(robot, 'selected_map'),
+                    state_attr(robot, 'docked')] != observed_position }}
+              timeout:
+                seconds: "{{ settle_seconds }}"
+              continue_on_timeout: true
+          until: "{{ not wait.completed or state_attr(robot, 'docked') == true }}"
+
+  - variables:
+      # Внешние атрибуты Dreame читаются после ожидания, а не в момент
+      # постановки запуска в очередь. ID комнаты переводится в имя автоматически.
+      confirmed_position: >-
+        {{ [has_value(robot), state_attr(robot, 'current_segment'),
+            state_attr(robot, 'selected_map_id'), state_attr(robot, 'selected_map'),
+            state_attr(robot, 'docked')] }}
+      room_tables: >-
+        {% set value = state_attr(robot, 'rooms') %}
+        {{ value if value is mapping else {} }}
+      current_map: "{{ state_attr(robot, 'selected_map') | default('', true) }}"
+      current_segment: "{{ state_attr(robot, 'current_segment') | int(-1) }}"
+      map_rooms: >-
+        {% if current_map in room_tables %}
+          {{ room_tables[current_map] }}
+        {% elif room_tables | count == 1 %}
+          {{ (room_tables.values() | list)[0] }}
+        {% else %}
+          {{ [] }}
+        {% endif %}
+      current_room: >-
+        {% set ns = namespace(name='') %}
+        {% if has_value(robot) and state_attr(robot, 'docked') == false %}
+          {% for room in map_rooms %}
+            {% if room.id | int(-1) == current_segment %}
+              {% set ns.name = room.name | trim | lower %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {{ ns.name }}
+      duplicate_lights: >-
+        {% set lights = bindings | map(attribute='lights') | sum(start=[]) %}
+        {{ lights | count != lights | unique | list | count }}
+      target_room: "{{ current_room if not duplicate_lights else '' }}"
+
+  # Сначала восстановить покинутые комнаты, включая общую очистку на базе.
+  - repeat:
+      for_each: "{{ bindings }}"
+      sequence:
+        - if: >-
+            {{ (not target_room or repeat.item.name != target_room)
+               and state_attr(repeat.item.snapshot, 'entity_id') is not none }}
+          then:
+            - action: scene.turn_on
+              target:
+                entity_id: "{{ repeat.item.snapshot }}"
+            - action: scene.delete
+              target:
+                entity_id: "{{ repeat.item.snapshot }}"
+
+  - if: "{{ duplicate_lights }}"
+    then:
+      - action: persistent_notification.create
+        data:
+          notification_id: "{{ notification_id }}"
+          title: "Dreame — один светильник указан несколько раз"
+          message: >-
+            Уберите повторяющиеся светильники из списка комнат этой автоматизации.
+            Каждый light должен быть только в одной записи. Свет восстановлен,
+            новые настройки не применяются до исправления списка.
+      - stop: Повторяющиеся светильники в настройках.
+
+  # Для каждой записи текущей комнаты сохранить снимок один раз и применить
+  # её настройки. Несколько записей одной комнаты допускаются для разных ламп.
+  - repeat:
+      for_each: "{{ bindings }}"
+      sequence:
+        - if: >-
+            {{ target_room and repeat.item.name == target_room
+               and state_attr(repeat.item.snapshot, 'entity_id') is none }}
+          then:
+            - variables:
+                light_states: "{{ expand(repeat.item.lights) | map(attribute='state') | list }}"
+            - if: >-
+                {{ repeat.item.lights | count > 0
+                   and light_states | count == repeat.item.lights | count
+                   and light_states | reject('in', ['on', 'off']) | list | count == 0 }}
+              then:
+                - action: scene.create
+                  data:
+                    scene_id: "{{ repeat.item.snapshot.split('.')[1] }}"
+                    snapshot_entities: "{{ repeat.item.lights }}"
+                - wait_template: "{{ state_attr(repeat.item.snapshot, 'entity_id') is not none }}"
+                  timeout:
+                    seconds: 5
+                  continue_on_timeout: false
+                # Позиция могла измениться во время асинхронного scene.create.
+                # Тогда свет ещё не менялся: удалить только ненужный снимок.
+                - if: >-
+                    {{ [has_value(robot), state_attr(robot, 'current_segment'),
+                        state_attr(robot, 'selected_map_id'), state_attr(robot, 'selected_map'),
+                        state_attr(robot, 'docked')] == confirmed_position }}
+                  then:
+                    - action: light.turn_on
+                      target:
+                        entity_id: "{{ repeat.item.lights }}"
+                      data: >-
+                        {% set item = repeat.item %}
+                        {% if item.mode == 'rgb' %}
+                          {{ dict(brightness_pct=item.brightness, rgb_color=item.color) }}
+                        {% elif item.mode == 'temperature' %}
+                          {{ dict(brightness_pct=item.brightness, color_temp_kelvin=item.temperature) }}
+                        {% else %}
+                          {{ dict(brightness_pct=item.brightness) }}
+                        {% endif %}
+                  else:
+                    - action: scene.delete
+                      target:
+                        entity_id: "{{ repeat.item.snapshot }}"
