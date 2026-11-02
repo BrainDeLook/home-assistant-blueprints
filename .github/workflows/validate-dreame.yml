@@ -1,0 +1,21 @@
+name: Validate Dreame blueprint
+on:
+  push:
+    paths:
+      - dreame_room_lights.yaml
+      - tests/check_dreame_rooms_ha.py
+      - .github/workflows/validate-dreame.yml
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - run: pip install homeassistant==2026.10.4
+      - run: python tests/check_dreame_rooms_ha.py

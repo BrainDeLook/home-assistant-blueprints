@@ -7,6 +7,8 @@ blueprint:
     можно задать свой цвет и яркость, а незаполненные настройки берутся из общих.
     Свет меняется после подтверждения перехода и восстанавливается при выезде.
     На базе восстанавливается сразу, включая промежуточную мойку.
+    Для каждой комнаты можно выбрать автоматизации, временно отключаемые на время
+    присутствия робота. Восстанавливаются только ранее включённые автоматизации.
     После сохранения нажмите «Выполнить действия»: уведомление покажет найденные
     комнаты и проверит настройки, не меняя свет. Требуется Home Assistant 2026.9+.
     Снимки временные: перезапуск HA или перезагрузка сцен удаляет их.
@@ -61,6 +63,13 @@ blueprint:
                       step: 1
                       unit_of_measurement: "%"
                       mode: slider
+                automations:
+                  label: Приостановить автоматизации — необязательно
+                  selector:
+                    entity:
+                      multiple: true
+                      filter:
+                        - domain: automation
                 mode:
                   label: Режим света — необязательно
                   selector:
@@ -85,6 +94,19 @@ blueprint:
                       step: 100
                       unit_of_measurement: K
                       mode: slider
+        automation_journal:
+          name: Текстовый помощник для восстановления автоматизаций
+          description: >-
+            Нужен только при выборе автоматизаций в комнатах. Создайте текстовый
+            помощник input_text с максимальной длиной 255 и без initial в YAML.
+            Используйте отдельный помощник для этой автоматизации. Он запоминает,
+            какие автоматизации включить при выезде, в том числе после перезапуска HA.
+            Не выбирайте саму автоматизацию Dreame в списках комнат.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_text
     timing:
       name: "2. Защита от скачков между комнатами"
       icon: mdi:timer-outline
@@ -177,6 +199,7 @@ triggers:
 variables:
   robot: !input vacuum
   configured_rooms: !input room_bindings
+  restore_helper: !input automation_journal
   settle_seconds: !input room_delay
   base_brightness: !input default_brightness
   base_mode: !input default_mode
@@ -193,6 +216,7 @@ variables:
         name=item.room | trim | lower,
         label=item.room | trim,
         lights=item.lights,
+        automations=item.get('automations', []),
         brightness=item.get('brightness', base_brightness),
         mode=item.get('mode', base_mode),
         color=item.get('color', base_color),
@@ -234,6 +258,7 @@ actions:
               {% set found = item.name in ns.names %}
             {{ '\n' }}- {{ item.label }}: {{ 'найдена' if found else 'НЕ НАЙДЕНА — проверьте название' }};
             {{ item.lights | count }} светильников, {{ item.brightness }}%.
+            Приостановить: {{ item.automations | join(', ') or 'нет' }}.
               {% for light in item.lights %}
                 {% if light in ns.used %}
                   {% set ns.errors = ns.errors + [light ~ ' указан несколько раз'] %}
@@ -244,6 +269,9 @@ actions:
             {{ '\n' }}Добавьте комнаты в настройках автоматизации.
             {% endfor %}
             {% if ns.errors %}{{ '\n\n' }}{{ ns.errors | join('; ') }}.{% endif %}
+            {% if bindings | map(attribute='automations') | sum(start=[]) | count > 0 and not restore_helper %}
+            {{ '\n\n' }}Выберите текстовый помощник для восстановления автоматизаций.
+            {% endif %}
             {{ '\n\n' }}Свет не изменён. Названия можно скопировать отсюда; ID не нужны.
       - stop: Проверка завершена — смотрите уведомление Home Assistant.
 
@@ -302,6 +330,28 @@ actions:
         {% set lights = bindings | map(attribute='lights') | sum(start=[]) %}
         {{ lights | count != lights | unique | list | count }}
       target_room: "{{ current_room if not duplicate_lights else '' }}"
+      paused_record: "{{ states(restore_helper) | from_json(none) if restore_helper and states(restore_helper) else {} }}"
+      record_valid: >-
+        {{ paused_record is mapping and
+           (paused_record == {} or
+            (paused_record.get('room') is string and paused_record.get('entities') is list
+             and paused_record.get('owner') == this.entity_id
+             and paused_record.entities | select('match', '^automation\\.') | list | count == paused_record.entities | count
+             and this.entity_id not in paused_record.entities)) }}
+
+  - if: >-
+      {{ (restore_helper and (not has_value(restore_helper) or not record_valid)) or
+         (not restore_helper and bindings | map(attribute='automations') | sum(start=[]) | count > 0) }}
+    then:
+      - action: persistent_notification.create
+        data:
+          notification_id: "{{ notification_id }}"
+          title: "Dreame — проверьте помощник восстановления"
+          message: >-
+            Выберите отдельный доступный input_text длиной 255 без initial.
+            Его содержимое должно быть пустым или журналом этой автоматизации.
+            Свет и автоматизации не изменены.
+      - stop: Недоступен журнал восстановления автоматизаций.
 
   # Сначала восстановить покинутые комнаты, включая общую очистку на базе.
   - repeat:
@@ -318,6 +368,21 @@ actions:
               target:
                 entity_id: "{{ repeat.item.snapshot }}"
 
+  # Сначала вернуть свет, затем разрешить обычным автоматизациям работать.
+  # Журнал очищается только после успешного включения; повторный запуск безопасен.
+  - if: "{{ paused_record and paused_record.room != target_room }}"
+    then:
+      - if: "{{ paused_record.entities | count > 0 }}"
+        then:
+          - action: automation.turn_on
+            target:
+              entity_id: "{{ paused_record.entities }}"
+      - action: input_text.set_value
+        target:
+          entity_id: "{{ restore_helper }}"
+        data:
+          value: "{}"
+
   - if: "{{ duplicate_lights }}"
     then:
       - action: persistent_notification.create
@@ -329,6 +394,42 @@ actions:
             Каждый light должен быть только в одной записи. Свет восстановлен,
             новые настройки не применяются до исправления списка.
       - stop: Повторяющиеся светильники в настройках.
+
+  - variables:
+      room_automations: >-
+        {{ bindings | selectattr('name', 'eq', target_room) | map(attribute='automations')
+           | sum(start=[]) | unique | reject('eq', this.entity_id) | list }}
+      enabled_automations: >-
+        {{ expand(room_automations) | selectattr('state', 'eq', 'on') | map(attribute='entity_id') | list }}
+      restore_entities: >-
+        {{ ((paused_record.entities if paused_record and paused_record.room == target_room else [])
+            + enabled_automations) | unique | list }}
+      next_record: "{{ dict(owner=this.entity_id, room=target_room, entities=restore_entities) | to_json }}"
+
+  - if: "{{ target_room and room_automations | count > 0 }}"
+    then:
+      - if: "{{ next_record | length > state_attr(restore_helper, 'max') | int(255) }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              notification_id: "{{ notification_id }}"
+              title: "Dreame — список автоматизаций слишком длинный"
+              message: >-
+                Журнал не помещается в текстовый помощник. Сократите список
+                или entity_id автоматизаций. Новые автоматизации не отключены.
+          - stop: Недостаточно места для безопасного восстановления.
+      # Сначала записать исходно включённые, затем отключить. Не сбрасывать журнал
+      # на повторном событии той же комнаты или после перезапуска HA.
+      - action: input_text.set_value
+        target:
+          entity_id: "{{ restore_helper }}"
+        data:
+          value: "{{ next_record }}"
+      - action: automation.turn_off
+        target:
+          entity_id: "{{ room_automations }}"
+        data:
+          stop_actions: true
 
   # Для каждой записи текущей комнаты сохранить снимок один раз и применить
   # её настройки. Несколько записей одной комнаты допускаются для разных ламп.
