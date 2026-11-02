@@ -106,7 +106,7 @@ async def main():
 
     async def journal_write(call):
         value = call.data['value']
-        entity = call.data['entity_id']
+        entity = call.data['entity_id'][0]
         assert len(value) <= hass.states.get(entity).attributes['max']
         hass.states.async_set(entity, value, {'max': 255})
 
