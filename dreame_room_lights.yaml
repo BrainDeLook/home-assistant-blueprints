@@ -357,17 +357,25 @@ actions:
         {{ lights | count != lights | unique | list | count }}
       target_room: "{{ current_room if not duplicate_lights else '' }}"
       sun_state: "{{ states(sun_entity) }}"
-      paused_record: "{{ states(restore_helper) | from_json(none) if restore_helper and states(restore_helper) else {} }}"
+      helper_available: >-
+        {{ restore_helper and not is_state(restore_helper, 'unavailable')
+           and state_attr(restore_helper, 'max') is number }}
+      # Новый input_text без initial и сохранённого значения имеет unknown.
+      # Это пустой журнал, если сама сущность существует и доступна.
+      paused_record: >-
+        {% set value = states(restore_helper) if restore_helper else '' %}
+        {{ value | from_json(none) if value | trim not in ['', 'unknown'] else {} }}
       record_valid: >-
         {{ paused_record is mapping and
            (paused_record == {} or
             (paused_record.get('room') is string and paused_record.get('entities') is list
              and paused_record.get('owner') == this.entity_id
+             and paused_record.entities | select('string') | list | count == paused_record.entities | count
              and paused_record.entities | select('match', '^automation\\.') | list | count == paused_record.entities | count
              and this.entity_id not in paused_record.entities)) }}
 
   - if: >-
-      {{ (restore_helper and (not has_value(restore_helper) or not record_valid)) or
+      {{ (restore_helper and (not helper_available or not record_valid)) or
          (not restore_helper and bindings | map(attribute='automations') | sum(start=[]) | count > 0) }}
     then:
       - action: persistent_notification.create
@@ -375,9 +383,24 @@ actions:
           notification_id: "{{ notification_id }}"
           title: "Dreame — проверьте помощник восстановления"
           message: >-
-            Выберите отдельный доступный input_text длиной 255 без initial.
-            Его содержимое должно быть пустым или журналом этой автоматизации.
-            Свет и автоматизации не изменены.
+            {% if not restore_helper %}
+            В комнатах выбраны автоматизации, но не выбран текстовый помощник.
+            Выберите отдельный input_text в разделе 1 блюпринта.
+            {% elif not helper_available %}
+            Помощник {{ restore_helper }} отсутствует или недоступен.
+            Текущее состояние: {{ states(restore_helper) }}. Проверьте выбранную сущность.
+            {% elif paused_record is mapping and paused_record.get('owner')
+                    and paused_record.owner != this.entity_id %}
+            Журнал {{ restore_helper }} принадлежит {{ paused_record.owner }},
+            а текущая автоматизация — {{ this.entity_id }}.
+            Не очищайте его, пока не восстановлены отключённые автоматизации владельца.
+            Выберите отдельный помощник или верните прежний entity_id автоматизации.
+            {% else %}
+            Помощник {{ restore_helper }} содержит повреждённый или неподдерживаемый журнал.
+            Не очищайте его, пока не проверены отключённые автоматизации.
+            {% endif %}
+            Свет и автоматизации не изменены. Максимальная длина помощника — 255,
+            initial при настройке через YAML задавать не нужно.
       - stop: Недоступен журнал восстановления автоматизаций.
 
   # Сначала восстановить покинутые комнаты, включая общую очистку на базе.

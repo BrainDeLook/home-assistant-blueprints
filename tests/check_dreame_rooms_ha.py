@@ -257,7 +257,8 @@ async def main():
     selector(blueprint.inputs['automation_journal']['selector'])('input_text.restore')
     automation.variables = ScriptVariables({**validated['variables'].variables,
         'configured_rooms': rooms, 'restore_helper': 'input_text.restore'})
-    hass.states.async_set('input_text.restore', '', {'max': 255})
+    # A newly created input_text has no restored value and reports unknown.
+    hass.states.async_set('input_text.restore', 'unknown', {'max': 255})
     hass.states.async_set('automation.motion', 'on')
     hass.states.async_set('automation.already_off', 'off')
     update(docked=False, current_segment=6)
@@ -280,7 +281,7 @@ async def main():
     assert hass.states.is_state('automation.motion', 'on')
     assert hass.states.is_state('automation.already_off', 'off')
     assert hass.states.is_state('input_text.restore', '{}')
-    print('PASS: per-room automation pause, initial off preserved, shared automation transition, self exclusion, manual no-op')
+    print('PASS: fresh unknown helper initializes safely, per-room pause, initial off preserved, shared transition, self exclusion')
 
     update(docked=False, current_segment=6)
     await run()
@@ -302,12 +303,21 @@ async def main():
         before = len(calls)
         await run()
         assert len(calls) == before and hass.states.is_state('automation.motion', 'on')
+        assert hass.states.get('input_text.restore').state == value
+        assert ('повреждённый' if value == 'not JSON' else 'принадлежит') in notifications[-1]
+    hass.states.async_set('input_text.restore', 'unavailable', {'max': 255})
+    before = len(calls)
+    await run()
+    assert len(calls) == before and 'недоступен' in notifications[-1]
+    hass.states.async_remove('input_text.restore')
+    await run()
+    assert len(calls) == before and 'отсутствует' in notifications[-1]
     hass.states.async_set('input_text.restore', '{}', {'max': 10})
     before = len(calls)
     await run()
     assert len(calls) == before and hass.states.is_state('automation.motion', 'on'), (calls[before:], notifications[-1])
     assert 'не помещается' in notifications[-1]
-    print('PASS: invalid journal, reused helper and capacity limit stop before pausing anything')
+    print('PASS: corrupt/foreign journals preserved; missing/unavailable helper and capacity limit block changes')
 
     # Solar rules gate new light overrides and the corresponding automation
     # pauses. Cleanup must remain independent of the sun after entry.
