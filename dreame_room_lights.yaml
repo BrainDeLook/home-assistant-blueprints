@@ -404,11 +404,11 @@ actions:
       restore_entities: >-
         {{ ((paused_record.entities if paused_record and paused_record.room == target_room else [])
             + enabled_automations) | unique | list }}
-      next_record: "{{ dict(owner=this.entity_id, room=target_room, entities=restore_entities) | to_json }}"
+      next_record: "{{ dict(owner=this.entity_id, room=target_room, entities=restore_entities) }}"
 
   - if: "{{ target_room and room_automations | count > 0 }}"
     then:
-      - if: "{{ next_record | length > state_attr(restore_helper, 'max') | int(255) }}"
+      - if: "{{ next_record | to_json | length > state_attr(restore_helper, 'max') | int(255) }}"
         then:
           - action: persistent_notification.create
             data:
@@ -424,7 +424,7 @@ actions:
         target:
           entity_id: "{{ restore_helper }}"
         data:
-          value: "{{ next_record }}"
+          value: "{{ next_record | to_json }}"
       - action: automation.turn_off
         target:
           entity_id: "{{ room_automations }}"

@@ -2,6 +2,7 @@ import asyncio
 import copy
 import sys
 from pathlib import Path
+import probatio
 
 WORK = Path(__file__).resolve().parents[1]
 
@@ -14,6 +15,7 @@ from homeassistant.core import Context, HomeAssistant, State
 from homeassistant.helpers.script import Script
 from homeassistant.helpers.script_variables import ScriptVariables
 from homeassistant.helpers.selector import selector
+from homeassistant.helpers import config_validation as cv
 from homeassistant.util.yaml import load_yaml
 
 
@@ -108,11 +110,12 @@ async def main():
         value = call.data['value']
         entity = call.data['entity_id'][0]
         assert len(value) <= hass.states.get(entity).attributes['max']
-        hass.states.async_set(entity, value, {'max': 255})
+        hass.states.async_set(entity, value, dict(hass.states.get(entity).attributes))
 
     hass.services.async_register('automation', 'turn_on', automation_on)
     hass.services.async_register('automation', 'turn_off', automation_off)
-    hass.services.async_register('input_text', 'set_value', journal_write)
+    hass.services.async_register('input_text', 'set_value', journal_write,
+        schema=cv.make_entity_service_schema({probatio.Required('value'): cv.string}))
 
     automation = Script(hass, validated['actions'], 'Dreame test', 'automation',
                         variables=validated['variables'], script_mode='queued', max_runs=2)
@@ -302,7 +305,7 @@ async def main():
     hass.states.async_set('input_text.restore', '{}', {'max': 10})
     before = len(calls)
     await run()
-    assert len(calls) == before and hass.states.is_state('automation.motion', 'on')
+    assert len(calls) == before and hass.states.is_state('automation.motion', 'on'), (calls[before:], notifications[-1])
     assert 'не помещается' in notifications[-1]
     print('PASS: invalid journal, reused helper and capacity limit stop before pausing anything')
 
