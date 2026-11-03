@@ -309,6 +309,43 @@ async def main():
     assert 'не помещается' in notifications[-1]
     print('PASS: invalid journal, reused helper and capacity limit stop before pausing anything')
 
+    # Solar rules gate new light overrides and the corresponding automation
+    # pauses. Cleanup must remain independent of the sun after entry.
+    hass.states.async_set('input_text.restore', '{}', {'max': 255})
+    hass.states.async_set('light.kitchen', original['light.kitchen']['state'],
+        dict(original['light.kitchen']['attributes']))
+    for rule, sun, allowed in [
+        ('below_horizon', 'above_horizon', False),
+        ('below_horizon', 'below_horizon', True),
+        ('above_horizon', 'below_horizon', False),
+        ('above_horizon', 'above_horizon', True),
+        ('below_horizon', 'unavailable', False),
+        ('always', 'unavailable', True),
+    ]:
+        solar_rooms = [{'room': 'Кухня', 'lights': ['light.kitchen'],
+                        'automations': ['automation.motion'], 'sun_condition': rule}]
+        selector(blueprint.inputs['room_bindings']['selector'])(solar_rooms)
+        automation.variables = ScriptVariables({**validated['variables'].variables,
+            'configured_rooms': solar_rooms, 'restore_helper': 'input_text.restore'})
+        hass.states.async_set('sun.sun', sun)
+        update(docked=False, current_segment=6)
+        before = len(calls)
+        await run()
+        if allowed:
+            assert hass.states.is_state('automation.motion', 'off') and snapshots
+            assert hass.states.is_state('light.kitchen', 'on')
+            hass.states.async_set('sun.sun', 'below_horizon' if sun == 'above_horizon' else 'above_horizon')
+            await run()
+            assert snapshots and hass.states.is_state('automation.motion', 'off')
+        else:
+            assert len(calls) == before and not snapshots
+            assert hass.states.is_state('automation.motion', 'on')
+        update(docked=True)
+        await run()
+        assert not snapshots and restored('light.kitchen')
+        assert hass.states.is_state('automation.motion', 'on')
+    print('PASS: solar rules above/below/always, unavailable sun, blocked-entry no-op and unconditional cleanup')
+
     await automation.async_stop()
     await hass.async_stop(force=True)
     print('All checks passed using real HA schemas, templates and script engine; scene/light service endpoints mocked.')

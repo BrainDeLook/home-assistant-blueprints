@@ -9,6 +9,7 @@ blueprint:
     На базе восстанавливается сразу, включая промежуточную мойку.
     Для каждой комнаты можно выбрать автоматизации, временно отключаемые на время
     присутствия робота. Восстанавливаются только ранее включённые автоматизации.
+    Необязательное условие солнца разрешает включение всегда, только днём или ночью.
     После сохранения нажмите «Выполнить действия»: уведомление покажет найденные
     комнаты и проверит настройки, не меняя свет. Требуется Home Assistant 2026.9+.
     Снимки временные: перезапуск HA или перезагрузка сцен удаляет их.
@@ -70,6 +71,17 @@ blueprint:
                       multiple: true
                       filter:
                         - domain: automation
+                sun_condition:
+                  label: Когда включать свет — необязательно, по умолчанию всегда
+                  selector:
+                    select:
+                      options:
+                        - label: Всегда — независимо от солнца
+                          value: always
+                        - label: Только когда солнце над горизонтом
+                          value: above_horizon
+                        - label: Только когда солнце ниже горизонта
+                          value: below_horizon
                 mode:
                   label: Режим света — необязательно
                   selector:
@@ -217,6 +229,7 @@ variables:
         label=item.room | trim,
         lights=item.lights,
         automations=item.get('automations', []),
+        sun_condition=item.get('sun_condition', 'always'),
         brightness=item.get('brightness', base_brightness),
         mode=item.get('mode', base_mode),
         color=item.get('color', base_color),
@@ -259,6 +272,8 @@ actions:
             {{ '\n' }}- {{ item.label }}: {{ 'найдена' if found else 'НЕ НАЙДЕНА — проверьте название' }};
             {{ item.lights | count }} светильников, {{ item.brightness }}%.
             Приостановить: {{ item.automations | join(', ') or 'нет' }}.
+            Условие солнца: {{ {'always': 'всегда', 'above_horizon': 'над горизонтом',
+                               'below_horizon': 'ниже горизонта'}[item.sun_condition] }}.
               {% for light in item.lights %}
                 {% if light in ns.used %}
                   {% set ns.errors = ns.errors + [light ~ ' указан несколько раз'] %}
@@ -330,6 +345,7 @@ actions:
         {% set lights = bindings | map(attribute='lights') | sum(start=[]) %}
         {{ lights | count != lights | unique | list | count }}
       target_room: "{{ current_room if not duplicate_lights else '' }}"
+      sun_state: "{{ states('sun.sun') }}"
       paused_record: "{{ states(restore_helper) | from_json(none) if restore_helper and states(restore_helper) else {} }}"
       record_valid: >-
         {{ paused_record is mapping and
@@ -397,8 +413,15 @@ actions:
 
   - variables:
       room_automations: >-
-        {{ bindings | selectattr('name', 'eq', target_room) | map(attribute='automations')
-           | sum(start=[]) | unique | reject('eq', this.entity_id) | list }}
+        {% set ns = namespace(entities=[]) %}
+        {% for item in bindings %}
+          {% if item.name == target_room and
+                (item.sun_condition == 'always' or item.sun_condition == sun_state
+                 or state_attr(item.snapshot, 'entity_id') is not none) %}
+            {% set ns.entities = ns.entities + item.automations %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.entities | unique | reject('eq', this.entity_id) | list }}
       enabled_automations: >-
         {{ expand(room_automations) | selectattr('state', 'eq', 'on') | map(attribute='entity_id') | list }}
       restore_entities: >-
@@ -438,6 +461,7 @@ actions:
       sequence:
         - if: >-
             {{ target_room and repeat.item.name == target_room
+               and (repeat.item.sun_condition == 'always' or repeat.item.sun_condition == sun_state)
                and state_attr(repeat.item.snapshot, 'entity_id') is none }}
           then:
             - variables:
