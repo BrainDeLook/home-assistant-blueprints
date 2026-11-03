@@ -346,6 +346,25 @@ async def main():
         assert hass.states.is_state('automation.motion', 'on')
     print('PASS: solar rules above/below/always, unavailable sun, blocked-entry no-op and unconditional cleanup')
 
+    selector(blueprint.inputs['sun_entity']['selector'])('sun.alternative')
+    automation.variables = ScriptVariables({**validated['variables'].variables,
+        'sun_entity': 'sun.alternative', 'configured_rooms': [
+            {'room': 'Кухня', 'lights': ['light.kitchen'], 'sun_condition': 'below_horizon'}]})
+    hass.states.async_set('sun.sun', 'below_horizon')
+    hass.states.async_set('sun.alternative', 'above_horizon')
+    update(docked=False, current_segment=6)
+    before = len(calls)
+    await run()
+    assert len(calls) == before and not snapshots
+    hass.states.async_set('sun.sun', 'above_horizon')
+    hass.states.async_set('sun.alternative', 'below_horizon')
+    await run()
+    assert snapshots and hass.states.is_state('light.kitchen', 'on')
+    update(docked=True)
+    await run()
+    assert restored('light.kitchen') and not snapshots
+    print('PASS: selected sun entity controls lighting even when sun.sun has opposite state')
+
     await automation.async_stop()
     await hass.async_stop(force=True)
     print('All checks passed using real HA schemas, templates and script engine; scene/light service endpoints mocked.')

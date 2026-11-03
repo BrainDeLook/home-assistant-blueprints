@@ -28,6 +28,16 @@ blueprint:
             entity:
               filter:
                 - domain: vacuum
+        sun_entity:
+          name: Сущность солнца
+          description: >-
+            Используется для условий «над горизонтом» и «ниже горизонта» в комнатах.
+            Обычно это «Солнце» (sun.sun). Для режима «Всегда» не используется.
+          default: sun.sun
+          selector:
+            entity:
+              filter:
+                - domain: sun
         room_bindings:
           name: Комнаты и светильники
           description: >-
@@ -210,6 +220,7 @@ triggers:
 
 variables:
   robot: !input vacuum
+  sun_entity: !input sun_entity
   configured_rooms: !input room_bindings
   restore_helper: !input automation_journal
   settle_seconds: !input room_delay
@@ -345,7 +356,7 @@ actions:
         {% set lights = bindings | map(attribute='lights') | sum(start=[]) %}
         {{ lights | count != lights | unique | list | count }}
       target_room: "{{ current_room if not duplicate_lights else '' }}"
-      sun_state: "{{ states('sun.sun') }}"
+      sun_state: "{{ states(sun_entity) }}"
       paused_record: "{{ states(restore_helper) | from_json(none) if restore_helper and states(restore_helper) else {} }}"
       record_valid: >-
         {{ paused_record is mapping and
