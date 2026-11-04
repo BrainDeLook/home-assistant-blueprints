@@ -65,9 +65,9 @@ blueprint:
           description: >-
             Добавляйте комнаты в этот список. Название должно совпадать с картой
             в приложении Dreame; регистр букв и пробелы по краям не важны.
-            Выберите отдельные light-сущности, не группы. Необязательные поля
+            Можно выбирать отдельные light-сущности и группы ламп. Необязательные поля
             можно оставить пустыми — применятся общие настройки из раздела 3.
-            Один светильник используйте только в одной записи.
+            Одна и та же лампа, включая участника группы, должна быть только в одной записи.
           default: []
           selector:
             object:
@@ -280,6 +280,7 @@ variables:
         name=item.room | trim | lower,
         label=item.room | trim,
         lights=item.lights,
+        members=expand(item.lights) | map(attribute='entity_id') | list,
         automations=item.get('automations', []),
         sun_condition=item.get('sun_condition', 'always'),
         brightness=item.get('brightness', base_brightness),
@@ -333,7 +334,7 @@ actions:
             Приостановить: {{ item.automations | join(', ') or 'нет' }}.
             Условие солнца: {{ {'always': 'всегда', 'above_horizon': 'над горизонтом',
                                'below_horizon': 'ниже горизонта'}[item.sun_condition] }}.
-              {% for light in item.lights %}
+              {% for light in item.members %}
                 {% if light in ns.used %}
                   {% set ns.errors = ns.errors + [light ~ ' указан несколько раз'] %}
                 {% endif %}
@@ -420,7 +421,7 @@ actions:
         {% endif %}
         {{ ns.name }}
       duplicate_lights: >-
-        {% set lights = bindings | map(attribute='lights') | sum(start=[]) %}
+        {% set lights = bindings | map(attribute='members') | sum(start=[]) %}
         {{ lights | count != lights | unique | list | count }}
       target_room: "{{ current_room if not duplicate_lights else '' }}"
       sun_state: "{{ states(sun_entity) }}"
@@ -566,16 +567,24 @@ actions:
                and state_attr(repeat.item.snapshot, 'entity_id') is none }}
           then:
             - variables:
-                light_states: "{{ expand(repeat.item.lights) | map(attribute='state') | list }}"
+                light_states: "{{ expand(repeat.item.members) | map(attribute='state') | list }}"
+                targets_ready: >-
+                  {% set ns = namespace(ready=true) %}
+                  {% for light in repeat.item.lights %}
+                    {% if states(light) not in ['on', 'off'] %}
+                      {% set ns.ready = false %}
+                    {% endif %}
+                  {% endfor %}
+                  {{ ns.ready }}
             - if: >-
-                {{ repeat.item.lights | count > 0
-                   and light_states | count == repeat.item.lights | count
+                {{ targets_ready and repeat.item.members | count > 0
+                   and light_states | count == repeat.item.members | count
                    and light_states | reject('in', ['on', 'off']) | list | count == 0 }}
               then:
                 - action: scene.create
                   data:
                     scene_id: "{{ repeat.item.snapshot.split('.')[1] }}"
-                    snapshot_entities: "{{ repeat.item.lights }}"
+                    snapshot_entities: "{{ repeat.item.members }}"
                 - wait_template: "{{ state_attr(repeat.item.snapshot, 'entity_id') is not none }}"
                   timeout:
                     seconds: 5
@@ -591,7 +600,7 @@ actions:
                   then:
                     - action: light.turn_on
                       target:
-                        entity_id: "{{ repeat.item.lights }}"
+                        entity_id: "{{ repeat.item.members }}"
                       data: >-
                         {% set item = repeat.item %}
                         {% if item.mode == 'rgb' %}

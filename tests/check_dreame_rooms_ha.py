@@ -16,6 +16,7 @@ from homeassistant.helpers.script import Script
 from homeassistant.helpers.script_variables import ScriptVariables
 from homeassistant.helpers.selector import selector
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.entity import entity_sources
 from homeassistant.util.yaml import load_yaml
 
 
@@ -424,6 +425,57 @@ async def main():
     for unsubscribe in unsubscribers:
         unsubscribe()
     print('PASS: real vacuum-state and sensor-event triggers; same-room resume; sensor overrides stale map; attribute-only no-op; dock cleanup')
+
+    # Reproduce the real trace: three selected light groups expand to nine
+    # lamps with different original states. Snapshot and restore the members.
+    group_ids = []
+    member_original = {}
+    for group_index in range(3):
+        members = []
+        for member_index in range(3):
+            entity = f'light.group_{group_index}_member_{member_index}'
+            members.append(entity)
+            hass.states.async_set(entity, 'off' if member_index == 2 else 'on',
+                {'brightness': 40 + group_index * 20 + member_index,
+                 'color_temp_kelvin': 2700 + member_index * 500})
+            member_original[entity] = hass.states.get(entity)
+        group = f'light.room_group_{group_index}'
+        group_ids.append(group)
+        entity_sources(hass)[group] = {'domain': 'group'}
+        hass.states.async_set(group, 'on', {'entity_id': members})
+    group_rooms = [{'room': 'Офис', 'lights': group_ids, 'brightness': 100,
+                    'mode': 'temperature', 'temperature': 6500}]
+    automation.variables = ScriptVariables({**validated['variables'].variables,
+        'configured_rooms': group_rooms})
+    update(docked=False, current_segment=1)
+    await run()
+    assert len(snapshots) == 1
+    assert set(next(iter(snapshots.values()))) == set(member_original)
+    for member in member_original:
+        assert hass.states.is_state(member, 'on')
+        assert hass.states.get(member).attributes['brightness_pct'] == 100
+        assert hass.states.get(member).attributes['color_temp_kelvin'] == 6500
+    await run()
+    assert len(snapshots) == 1
+    update(docked=True)
+    await run()
+    assert not snapshots
+    for member, previous in member_original.items():
+        current = hass.states.get(member)
+        assert current.state == previous.state and current.attributes == previous.attributes
+    print('PASS: three groups with nine lamps receive 100%/6500K and restore each member separately')
+
+    overlap = group_rooms + [{'room': 'Кухня', 'lights': [next(iter(member_original))]}]
+    automation.variables = ScriptVariables({**validated['variables'].variables, 'configured_rooms': overlap})
+    update(docked=False, current_segment=1)
+    before = len(calls)
+    await run()
+    assert len(calls) == before and 'повторяющиеся' in notifications[-1]
+    automation.variables = ScriptVariables({**validated['variables'].variables, 'configured_rooms': group_rooms})
+    hass.states.async_set(next(iter(member_original)), 'unavailable')
+    await run()
+    assert len(calls) == before and not snapshots
+    print('PASS: overlapping group membership and unavailable members cannot corrupt snapshots')
 
     await automation.async_stop()
     await hass.async_stop(force=True)
