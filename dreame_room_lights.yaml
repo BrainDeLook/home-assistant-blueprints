@@ -9,8 +9,7 @@ blueprint:
     Свет меняется после подтверждения перехода и восстанавливается при выезде.
     На базе восстанавливается сразу, включая промежуточную мойку.
     Для каждой комнаты можно выбрать автоматизации, временно отключаемые на время
-    присутствия робота. По умолчанию вне комнаты выбранные автоматизации включены.
-    Сохранение исходного состояния доступно отдельно с текстовым помощником.
+    присутствия робота. Вне комнаты выбранные автоматизации включены.
     Необязательное условие солнца разрешает включение всегда, только днём или ночью.
     После сохранения нажмите «Выполнить действия»: уведомление покажет найденные
     комнаты и проверит настройки, не меняя свет. Требуется Home Assistant 2026.9+.
@@ -139,29 +138,6 @@ blueprint:
                       step: 100
                       unit_of_measurement: K
                       mode: slider
-        preserve_automation_state:
-          name: Сохранять исходное состояние автоматизаций
-          description: >-
-            По умолчанию выключено: в комнате выбранные автоматизации отключены,
-            вне комнаты включены — помощник не нужен. Включите эту опцию, только
-            если нужно сохранять ранее выключенные автоматизации выключенными;
-            тогда выберите текстовый помощник ниже.
-          default: false
-          selector:
-            boolean: {}
-        automation_journal:
-          name: Текстовый помощник для восстановления автоматизаций
-          description: >-
-            Нужен только при включённом сохранении исходного состояния. Создайте текстовый
-            помощник input_text с максимальной длиной 255 и без initial в YAML.
-            Используйте отдельный помощник для этой автоматизации. Он запоминает,
-            какие автоматизации включить при выезде, в том числе после перезапуска HA.
-            Не выбирайте саму автоматизацию Dreame в списках комнат.
-          default: ""
-          selector:
-            entity:
-              filter:
-                - domain: input_text
     timing:
       name: "2. Защита от скачков между комнатами"
       icon: mdi:timer-outline
@@ -274,9 +250,6 @@ variables:
   state_sensor: !input robot_state_sensor
   sun_entity: !input sun_entity
   configured_rooms: !input room_bindings
-  preserve_state: !input preserve_automation_state
-  configured_journal: !input automation_journal
-  restore_helper: "{{ configured_journal if preserve_state else '' }}"
   settle_seconds: !input room_delay
   base_brightness: !input default_brightness
   base_mode: !input default_mode
@@ -359,10 +332,6 @@ actions:
             {{ '\n' }}Добавьте комнаты в настройках автоматизации.
             {% endfor %}
             {% if ns.errors %}{{ '\n\n' }}{{ ns.errors | join('; ') }}.{% endif %}
-            {{ '\n' }}Режим автоматизаций: {{ 'сохранение исходного состояния' if preserve_state else 'без помощника: вне комнаты включены' }}.
-            {% if preserve_state and bindings | map(attribute='automations') | sum(start=[]) | count > 0 and not restore_helper %}
-            {{ '\n\n' }}Выберите текстовый помощник для восстановления автоматизаций.
-            {% endif %}
             {{ '\n\n' }}Свет не изменён. Названия можно скопировать отсюда; ID не нужны.
       - stop: Проверка завершена — смотрите уведомление Home Assistant.
 
@@ -441,51 +410,6 @@ actions:
         {{ lights | count != lights | unique | list | count }}
       target_room: "{{ current_room if not duplicate_lights else '' }}"
       sun_state: "{{ states(sun_entity) }}"
-      helper_available: >-
-        {{ restore_helper and not is_state(restore_helper, 'unavailable')
-           and state_attr(restore_helper, 'max') is number }}
-      # Новый input_text без initial и сохранённого значения имеет unknown.
-      # Это пустой журнал, если сама сущность существует и доступна.
-      paused_record: >-
-        {% set value = states(restore_helper) if restore_helper else '' %}
-        {{ value | from_json(none) if value | trim not in ['', 'unknown'] else {} }}
-      record_valid: >-
-        {{ paused_record is mapping and
-           (paused_record == {} or
-            (paused_record.get('room') is string and paused_record.get('entities') is list
-             and paused_record.get('owner') == this.entity_id
-             and paused_record.entities | select('string') | list | count == paused_record.entities | count
-             and paused_record.entities | select('match', '^automation\\.') | list | count == paused_record.entities | count
-             and this.entity_id not in paused_record.entities)) }}
-
-  - if: >-
-      {{ preserve_state and ((restore_helper and (not helper_available or not record_valid)) or
-         (not restore_helper and bindings | map(attribute='automations') | sum(start=[]) | count > 0)) }}
-    then:
-      - action: persistent_notification.create
-        data:
-          notification_id: "{{ notification_id }}"
-          title: "Dreame — проверьте помощник восстановления"
-          message: >-
-            {% if not restore_helper %}
-            В комнатах выбраны автоматизации, но не выбран текстовый помощник.
-            Выберите отдельный input_text в разделе 1 блюпринта.
-            {% elif not helper_available %}
-            Помощник {{ restore_helper }} отсутствует или недоступен.
-            Текущее состояние: {{ states(restore_helper) }}. Проверьте выбранную сущность.
-            {% elif paused_record is mapping and paused_record.get('owner')
-                    and paused_record.owner != this.entity_id %}
-            Журнал {{ restore_helper }} принадлежит {{ paused_record.owner }},
-            а текущая автоматизация — {{ this.entity_id }}.
-            Не очищайте его, пока не восстановлены отключённые автоматизации владельца.
-            Выберите отдельный помощник или верните прежний entity_id автоматизации.
-            {% else %}
-            Помощник {{ restore_helper }} содержит повреждённый или неподдерживаемый журнал.
-            Не очищайте его, пока не проверены отключённые автоматизации.
-            {% endif %}
-            Свет и автоматизации не изменены. Максимальная длина помощника — 255,
-            initial при настройке через YAML задавать не нужно.
-      - stop: Недоступен журнал восстановления автоматизаций.
 
   # Сначала восстановить покинутые комнаты, включая общую очистку на базе.
   - repeat:
@@ -501,21 +425,6 @@ actions:
             - action: scene.delete
               target:
                 entity_id: "{{ repeat.item.snapshot }}"
-
-  # Сначала вернуть свет, затем разрешить обычным автоматизациям работать.
-  # Журнал очищается только после успешного включения; повторный запуск безопасен.
-  - if: "{{ paused_record and paused_record.room != target_room }}"
-    then:
-      - if: "{{ paused_record.entities | count > 0 }}"
-        then:
-          - action: automation.turn_on
-            target:
-              entity_id: "{{ paused_record.entities }}"
-      - action: input_text.set_value
-        target:
-          entity_id: "{{ restore_helper }}"
-        data:
-          value: "{}"
 
   - if: "{{ duplicate_lights }}"
     then:
@@ -540,18 +449,12 @@ actions:
           {% endif %}
         {% endfor %}
         {{ ns.entities | unique | reject('eq', this.entity_id) | list }}
-      enabled_automations: >-
-        {{ expand(room_automations) | selectattr('state', 'eq', 'on') | map(attribute='entity_id') | list }}
-      restore_entities: >-
-        {{ ((paused_record.entities if paused_record and paused_record.room == target_room else [])
-            + enabled_automations) | unique | list }}
-      next_record: "{{ dict(owner=this.entity_id, room=target_room, entities=restore_entities) }}"
       outside_automations: >-
         {{ bindings | rejectattr('name', 'eq', target_room) | map(attribute='automations')
            | sum(start=[]) | unique | reject('in', room_automations)
            | reject('eq', this.entity_id) | list }}
 
-  - if: "{{ not preserve_state and outside_automations | count > 0 }}"
+  - if: "{{ outside_automations | count > 0 }}"
     then:
       - action: automation.turn_on
         target:
@@ -559,25 +462,6 @@ actions:
 
   - if: "{{ target_room and room_automations | count > 0 }}"
     then:
-      - if: "{{ preserve_state }}"
-        then:
-          - if: "{{ next_record | to_json | length > state_attr(restore_helper, 'max') | int(255) }}"
-            then:
-              - action: persistent_notification.create
-                data:
-                  notification_id: "{{ notification_id }}"
-                  title: "Dreame — список автоматизаций слишком длинный"
-                  message: >-
-                    Журнал не помещается в текстовый помощник. Сократите список
-                    или entity_id автоматизаций. Новые автоматизации не отключены.
-              - stop: Недостаточно места для безопасного восстановления.
-          # Сначала записать исходно включённые, затем отключить. Не сбрасывать журнал
-          # на повторном событии той же комнаты или после перезапуска HA.
-          - action: input_text.set_value
-            target:
-              entity_id: "{{ restore_helper }}"
-            data:
-              value: "{{ next_record | to_json }}"
       - action: automation.turn_off
         target:
           entity_id: "{{ room_automations }}"

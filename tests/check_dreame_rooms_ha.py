@@ -2,7 +2,6 @@ import asyncio
 import copy
 import sys
 from pathlib import Path
-import probatio
 
 WORK = Path(__file__).resolve().parents[1]
 
@@ -15,7 +14,6 @@ from homeassistant.core import Context, HomeAssistant, State
 from homeassistant.helpers.script import Script
 from homeassistant.helpers.script_variables import ScriptVariables
 from homeassistant.helpers.selector import selector
-from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.entity import entity_sources
 from homeassistant.util.yaml import load_yaml
 
@@ -109,16 +107,8 @@ async def main():
             hass.states.async_set(entity, 'off')
             calls.append(('pause', entity))
 
-    async def journal_write(call):
-        value = call.data['value']
-        entity = call.data['entity_id'][0]
-        assert len(value) <= hass.states.get(entity).attributes['max']
-        hass.states.async_set(entity, value, dict(hass.states.get(entity).attributes))
-
     hass.services.async_register('automation', 'turn_on', automation_on)
     hass.services.async_register('automation', 'turn_off', automation_off)
-    hass.services.async_register('input_text', 'set_value', journal_write,
-        schema=cv.make_entity_service_schema({probatio.Required('value'): cv.string}))
 
     automation = Script(hass, validated['actions'], 'Dreame test', 'automation',
                         variables=validated['variables'], script_mode='queued', max_runs=2)
@@ -250,83 +240,11 @@ async def main():
     await run()
     assert len(calls) == before and 'Уберите повторяющиеся' in notifications[-1]
     print('PASS: duplicate lamps are rejected with an actionable notification')
-    # Optional automation pausing: preserve off states, survive lost scenes,
-    # reject corrupt/shared journals and do not pause the controlling automation.
-    rooms = [
-        {'room': 'Кухня', 'lights': ['light.kitchen'], 'automations': ['automation.motion', 'automation.already_off', 'automation.test']},
-        {'room': 'Офис', 'lights': ['light.office'], 'automations': ['automation.motion']},
-    ]
-    selector(blueprint.inputs['room_bindings']['selector'])(rooms)
-    selector(blueprint.inputs['automation_journal']['selector'])('input_text.restore')
-    automation.variables = ScriptVariables({**validated['variables'].variables,
-        'configured_rooms': rooms, 'restore_helper': 'input_text.restore', 'preserve_state': True})
-    # A newly created input_text has no restored value and reports unknown.
-    hass.states.async_set('input_text.restore', 'unknown', {'max': 255})
-    hass.states.async_set('automation.motion', 'on')
-    hass.states.async_set('automation.already_off', 'off')
-    update(docked=False, current_segment=6)
-    before = len(calls)
-    await run(manual=True)
-    assert len(calls) == before and hass.states.is_state('automation.motion', 'on')
-    await run()
-    assert hass.states.is_state('automation.motion', 'off')
-    assert hass.states.is_state('automation.already_off', 'off')
-    assert hass.states.is_state('automation.test', 'on')
-    first_record = hass.states.get('input_text.restore').state
-    await run()
-    assert hass.states.get('input_text.restore').state == first_record
-    assert hass.states.is_state('automation.motion', 'off')
-    update(current_segment=1)
-    await run()
-    assert hass.states.is_state('automation.motion', 'off')
-    update(docked=True)
-    await run()
-    assert hass.states.is_state('automation.motion', 'on')
-    assert hass.states.is_state('automation.already_off', 'off')
-    assert hass.states.is_state('input_text.restore', '{}')
-    print('PASS: fresh unknown helper initializes safely, per-room pause, initial off preserved, shared transition, self exclusion')
-
-    update(docked=False, current_segment=6)
-    await run()
-    # A restart drops dynamic scenes, while input_text restores its saved value.
-    for entity in list(snapshots):
-        hass.states.async_remove(entity)
-    snapshots.clear()
-    await run()
-    assert hass.states.is_state('automation.motion', 'off')
-    update(docked=True)
-    await run()
-    assert hass.states.is_state('automation.motion', 'on')
-    assert hass.states.is_state('automation.already_off', 'off')
-    print('PASS: saved automation journal restores even after dynamic light scenes are lost')
-
-    update(docked=False, current_segment=6)
-    for value in ('not JSON', '{"owner":"automation.someone_else","room":"kitchen","entities":["automation.motion"]}'):
-        hass.states.async_set('input_text.restore', value, {'max': 255})
-        before = len(calls)
-        await run()
-        assert len(calls) == before and hass.states.is_state('automation.motion', 'on')
-        assert hass.states.get('input_text.restore').state == value
-        assert ('повреждённый' if value == 'not JSON' else 'принадлежит') in notifications[-1]
-    hass.states.async_set('input_text.restore', 'unavailable', {'max': 255})
-    before = len(calls)
-    await run()
-    assert len(calls) == before and 'недоступен' in notifications[-1]
-    hass.states.async_remove('input_text.restore')
-    await run()
-    assert len(calls) == before and 'отсутствует' in notifications[-1]
-    hass.states.async_set('input_text.restore', '{}', {'max': 10})
-    before = len(calls)
-    await run()
-    assert len(calls) == before and hass.states.is_state('automation.motion', 'on'), (calls[before:], notifications[-1])
-    assert 'не помещается' in notifications[-1]
-    print('PASS: corrupt/foreign journals preserved; missing/unavailable helper and capacity limit block changes')
-
     # Solar rules gate new light overrides and the corresponding automation
     # pauses. Cleanup must remain independent of the sun after entry.
-    hass.states.async_set('input_text.restore', '{}', {'max': 255})
     hass.states.async_set('light.kitchen', original['light.kitchen']['state'],
         dict(original['light.kitchen']['attributes']))
+    hass.states.async_set('automation.motion', 'on')
     for rule, sun, allowed in [
         ('below_horizon', 'above_horizon', False),
         ('below_horizon', 'below_horizon', True),
@@ -339,7 +257,7 @@ async def main():
                         'automations': ['automation.motion'], 'sun_condition': rule}]
         selector(blueprint.inputs['room_bindings']['selector'])(solar_rooms)
         automation.variables = ScriptVariables({**validated['variables'].variables,
-            'configured_rooms': solar_rooms, 'restore_helper': 'input_text.restore', 'preserve_state': True})
+            'configured_rooms': solar_rooms})
         hass.states.async_set('sun.sun', sun)
         update(docked=False, current_segment=6)
         before = len(calls)
@@ -482,7 +400,7 @@ async def main():
         {'room': 'Офис', 'lights': ['light.office'], 'automations': ['automation.office_motion', 'automation.shared']},
     ]
     automation.variables = ScriptVariables({**validated['variables'].variables,
-        'configured_rooms': simple_rooms, 'configured_journal': 'input_text.missing'})
+        'configured_rooms': simple_rooms})
     hass.states.async_set('automation.motion', 'on')
     hass.states.async_set('automation.office_motion', 'off')
     hass.states.async_set('automation.shared', 'on')
