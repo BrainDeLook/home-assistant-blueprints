@@ -8,7 +8,7 @@ WORK = Path(__file__).resolve().parents[1]
 
 
 from homeassistant.components.automation.config import PLATFORM_SCHEMA
-from homeassistant.components.homeassistant.triggers import state, homeassistant
+from homeassistant.components.homeassistant.triggers import state, homeassistant, event
 from homeassistant.components.blueprint.models import Blueprint, BlueprintInputs
 from homeassistant.components.blueprint.schemas import BLUEPRINT_SCHEMA
 from homeassistant.core import Context, HomeAssistant, State
@@ -41,6 +41,8 @@ async def main():
     for trigger in validated['triggers']:
         if trigger['platform'] == 'state':
             await state.async_validate_trigger_config(hass, trigger)
+        elif trigger['platform'] == 'event':
+            event.TRIGGER_SCHEMA(trigger)
         else:
             homeassistant.TRIGGER_SCHEMA(trigger)
     print('PASS: actual HA 2026.10.4 blueprint, selectors, input substitution, automation/action schemas')
@@ -374,6 +376,54 @@ async def main():
     await run()
     assert restored('light.kitchen') and not snapshots
     print('PASS: selected sun entity controls lighting even when sun.sun has opposite state')
+
+    # Attach actual HA triggers, rather than only calling the script manually.
+    # The selected room sensor is authoritative even if vacuum attributes lag.
+    selector(blueprint.inputs['current_room_sensor']['selector'])('sensor.room')
+    selector(blueprint.inputs['robot_state_sensor']['selector'])('sensor.robot_state')
+    automation.variables = ScriptVariables({**validated['variables'].variables,
+        'room_sensor': 'sensor.room', 'state_sensor': 'sensor.robot_state'})
+    update(docked=False, current_segment=6)
+    hass.states.async_set('vacuum.robot', 'paused', dict(attrs))
+    hass.states.async_set('sensor.room', 'Офис')
+    hass.states.async_set('sensor.robot_state', 'paused')
+    fired = []
+
+    async def triggered(variables, context):
+        fired.append(variables['trigger']['id'])
+        await automation.async_run({'this': hass.states.get('automation.test'), **variables}, context)
+
+    unsubscribers = []
+    for index in range(3):
+        trigger = validated['triggers'][index]
+        module = state if index == 0 else event
+        trigger_config = (await state.async_validate_trigger_config(hass, trigger)
+                          if index == 0 else event.TRIGGER_SCHEMA(trigger))
+        info = {'trigger_data': {'id': str(index), 'idx': str(index)},
+                'variables': {'selected_room_sensor': 'sensor.room',
+                              'selected_state_sensor': 'sensor.robot_state'}}
+        unsubscribers.append(await module.async_attach_trigger(hass, trigger_config, triggered, info))
+    hass.states.async_set('vacuum.robot', 'cleaning', dict(attrs))
+    await hass.async_block_till_done()
+    assert '0' in fired and hass.states.is_state('light.office', 'on')
+    assert hass.states.get('light.office').attributes['color_temp_kelvin'] == 2700
+    hass.states.async_set('sensor.robot_state', 'mopping')
+    await hass.async_block_till_done()
+    assert '2' in fired
+    hass.states.async_set('sensor.room', 'Кухня')
+    await hass.async_block_till_done()
+    assert '1' in fired and restored('light.office')
+    assert hass.states.is_state('light.kitchen', 'on')
+    before = len(calls)
+    hass.states.async_set('sensor.room', 'Кухня', {'room_id': 6})
+    await hass.async_block_till_done()
+    assert len(calls) == before
+    update(docked=True)
+    await hass.async_block_till_done()
+    assert not snapshots and restored('light.kitchen')
+    for unsubscribe in unsubscribers:
+        unsubscribe()
+    print('PASS: real vacuum-state and sensor-event triggers; same-room resume; sensor overrides stale map; attribute-only no-op; dock cleanup')
 
     await automation.async_stop()
     await hass.async_stop(force=True)

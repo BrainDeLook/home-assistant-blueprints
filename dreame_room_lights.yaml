@@ -3,7 +3,8 @@ blueprint:
   description: >-
     Одна автоматизация для всей квартиры. Выберите пылесос, добавьте комнаты
     кнопкой добавления и выберите светильники. Названия комнат берите с карты
-    приложения Dreame; ID комнат и карты вводить не нужно. Для каждой комнаты
+    приложения Dreame; ID комнат и карты вводить не нужно. В общих настройках
+    можно выбрать датчики текущей комнаты и состояния робота. Для каждой комнаты
     можно задать свой цвет и яркость, а незаполненные настройки берутся из общих.
     Свет меняется после подтверждения перехода и восстанавливается при выезде.
     На базе восстанавливается сразу, включая промежуточную мойку.
@@ -38,6 +39,27 @@ blueprint:
             entity:
               filter:
                 - domain: sun
+        current_room_sensor:
+          name: Датчик текущей комнаты — необязательно
+          description: >-
+            Если ваши рабочие автоматизации используют sensor.…_current_room,
+            выберите его здесь. Название комнаты будет читаться прямо из датчика.
+            Без выбора используется current_segment и карта сущности пылесоса.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        robot_state_sensor:
+          name: Датчик состояния робота — необязательно
+          description: >-
+            Например sensor.…_state. Его изменение также запускает проверку света,
+            в том числе при начале или возобновлении уборки в той же комнате.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
         room_bindings:
           name: Комнаты и светильники
           description: >-
@@ -192,7 +214,24 @@ blueprint:
               unit_of_measurement: K
               mode: slider
 
+trigger_variables:
+  selected_room_sensor: !input current_room_sensor
+  selected_state_sensor: !input robot_state_sensor
+
 triggers:
+  - trigger: state
+    entity_id: !input vacuum
+    to: null
+  - trigger: event
+    event_type: state_changed
+    event_data:
+      entity_id: "{{ selected_room_sensor }}"
+    enabled: "{{ selected_room_sensor != '' }}"
+  - trigger: event
+    event_type: state_changed
+    event_data:
+      entity_id: "{{ selected_state_sensor }}"
+    enabled: "{{ selected_state_sensor != '' }}"
   - trigger: state
     entity_id: !input vacuum
     attribute: current_segment
@@ -220,6 +259,8 @@ triggers:
 
 variables:
   robot: !input vacuum
+  room_sensor: !input current_room_sensor
+  state_sensor: !input robot_state_sensor
   sun_entity: !input sun_entity
   configured_rooms: !input room_bindings
   restore_helper: !input automation_journal
@@ -278,6 +319,13 @@ actions:
             {{ '\n' }}Карта пока недоступна. Убедитесь, что выбран Dreame и его карта загружена.
             {% endif %}
             {{ '\n\n' }}**Ваши настройки:**
+            {% if room_sensor %}
+            {{ '\n' }}Датчик комнаты: {{ room_sensor }} → {{ states(room_sensor) }}.
+            {% endif %}
+            {% if state_sensor %}
+            {{ '\n' }}Датчик состояния: {{ state_sensor }} → {{ states(state_sensor) }}.
+            {% endif %}
+            {{ '\n' }}Пылесос: {{ states(robot) }}; на базе: {{ state_attr(robot, 'docked') }}.
             {% for item in bindings %}
               {% set found = item.name in ns.names %}
             {{ '\n' }}- {{ item.label }}: {{ 'найдена' if found else 'НЕ НАЙДЕНА — проверьте название' }};
@@ -301,6 +349,13 @@ actions:
             {{ '\n\n' }}Свет не изменён. Названия можно скопировать отсюда; ID не нужны.
       - stop: Проверка завершена — смотрите уведомление Home Assistant.
 
+  - if: >-
+      {{ trigger.platform == 'event' and trigger.event.data.old_state is not none
+         and trigger.event.data.new_state is not none
+         and trigger.event.data.old_state.state == trigger.event.data.new_state.state }}
+    then:
+      - stop: Изменились только атрибуты датчика, а не его состояние.
+
   # Единый debounce для комнаты, карты и базы. Любое изменение сбрасывает
   # отсчёт; база прерывает ожидание сразу. Никаких отмен во время scene/light.
   - if: "{{ settle_seconds > 0 and state_attr(robot, 'docked') != true }}"
@@ -311,12 +366,16 @@ actions:
                 observed_position: >-
                   {{ [has_value(robot), state_attr(robot, 'current_segment'),
                       state_attr(robot, 'selected_map_id'), state_attr(robot, 'selected_map'),
-                      state_attr(robot, 'docked')] }}
+                      state_attr(robot, 'docked'),
+                      states(room_sensor) if room_sensor else none,
+                      states(state_sensor) if state_sensor else none] }}
             - wait_template: >-
                 {{ state_attr(robot, 'docked') == true or
                    [has_value(robot), state_attr(robot, 'current_segment'),
                     state_attr(robot, 'selected_map_id'), state_attr(robot, 'selected_map'),
-                    state_attr(robot, 'docked')] != observed_position }}
+                    state_attr(robot, 'docked'),
+                    states(room_sensor) if room_sensor else none,
+                    states(state_sensor) if state_sensor else none] != observed_position }}
               timeout:
                 seconds: "{{ settle_seconds }}"
               continue_on_timeout: true
@@ -328,7 +387,9 @@ actions:
       confirmed_position: >-
         {{ [has_value(robot), state_attr(robot, 'current_segment'),
             state_attr(robot, 'selected_map_id'), state_attr(robot, 'selected_map'),
-            state_attr(robot, 'docked')] }}
+            state_attr(robot, 'docked'),
+            states(room_sensor) if room_sensor else none,
+            states(state_sensor) if state_sensor else none] }}
       room_tables: >-
         {% set value = state_attr(robot, 'rooms') %}
         {{ value if value is mapping else {} }}
@@ -345,11 +406,17 @@ actions:
       current_room: >-
         {% set ns = namespace(name='') %}
         {% if has_value(robot) and state_attr(robot, 'docked') == false %}
-          {% for room in map_rooms %}
-            {% if room.id | int(-1) == current_segment %}
-              {% set ns.name = room.name | trim | lower %}
+          {% if room_sensor %}
+            {% if has_value(room_sensor) %}
+              {% set ns.name = states(room_sensor) | trim | lower %}
             {% endif %}
-          {% endfor %}
+          {% else %}
+            {% for room in map_rooms %}
+              {% if room.id | int(-1) == current_segment %}
+                {% set ns.name = room.name | trim | lower %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
         {% endif %}
         {{ ns.name }}
       duplicate_lights: >-
@@ -518,7 +585,9 @@ actions:
                 - if: >-
                     {{ [has_value(robot), state_attr(robot, 'current_segment'),
                         state_attr(robot, 'selected_map_id'), state_attr(robot, 'selected_map'),
-                        state_attr(robot, 'docked')] == confirmed_position }}
+                        state_attr(robot, 'docked'),
+                        states(room_sensor) if room_sensor else none,
+                        states(state_sensor) if state_sensor else none] == confirmed_position }}
                   then:
                     - action: light.turn_on
                       target:
