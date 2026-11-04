@@ -9,7 +9,8 @@ blueprint:
     Свет меняется после подтверждения перехода и восстанавливается при выезде.
     На базе восстанавливается сразу, включая промежуточную мойку.
     Для каждой комнаты можно выбрать автоматизации, временно отключаемые на время
-    присутствия робота. Восстанавливаются только ранее включённые автоматизации.
+    присутствия робота. По умолчанию вне комнаты выбранные автоматизации включены.
+    Сохранение исходного состояния доступно отдельно с текстовым помощником.
     Необязательное условие солнца разрешает включение всегда, только днём или ночью.
     После сохранения нажмите «Выполнить действия»: уведомление покажет найденные
     комнаты и проверит настройки, не меняя свет. Требуется Home Assistant 2026.9+.
@@ -138,10 +139,20 @@ blueprint:
                       step: 100
                       unit_of_measurement: K
                       mode: slider
+        preserve_automation_state:
+          name: Сохранять исходное состояние автоматизаций
+          description: >-
+            По умолчанию выключено: в комнате выбранные автоматизации отключены,
+            вне комнаты включены — помощник не нужен. Включите эту опцию, только
+            если нужно сохранять ранее выключенные автоматизации выключенными;
+            тогда выберите текстовый помощник ниже.
+          default: false
+          selector:
+            boolean: {}
         automation_journal:
           name: Текстовый помощник для восстановления автоматизаций
           description: >-
-            Нужен только при выборе автоматизаций в комнатах. Создайте текстовый
+            Нужен только при включённом сохранении исходного состояния. Создайте текстовый
             помощник input_text с максимальной длиной 255 и без initial в YAML.
             Используйте отдельный помощник для этой автоматизации. Он запоминает,
             какие автоматизации включить при выезде, в том числе после перезапуска HA.
@@ -263,7 +274,9 @@ variables:
   state_sensor: !input robot_state_sensor
   sun_entity: !input sun_entity
   configured_rooms: !input room_bindings
-  restore_helper: !input automation_journal
+  preserve_state: !input preserve_automation_state
+  configured_journal: !input automation_journal
+  restore_helper: "{{ configured_journal if preserve_state else '' }}"
   settle_seconds: !input room_delay
   base_brightness: !input default_brightness
   base_mode: !input default_mode
@@ -296,6 +309,8 @@ variables:
 mode: queued
 max: 2
 max_exceeded: silent
+trace:
+  stored_traces: 50
 
 actions:
   # Ручной запуск только показывает диагностику, не имитирует въезд.
@@ -344,7 +359,8 @@ actions:
             {{ '\n' }}Добавьте комнаты в настройках автоматизации.
             {% endfor %}
             {% if ns.errors %}{{ '\n\n' }}{{ ns.errors | join('; ') }}.{% endif %}
-            {% if bindings | map(attribute='automations') | sum(start=[]) | count > 0 and not restore_helper %}
+            {{ '\n' }}Режим автоматизаций: {{ 'сохранение исходного состояния' if preserve_state else 'без помощника: вне комнаты включены' }}.
+            {% if preserve_state and bindings | map(attribute='automations') | sum(start=[]) | count > 0 and not restore_helper %}
             {{ '\n\n' }}Выберите текстовый помощник для восстановления автоматизаций.
             {% endif %}
             {{ '\n\n' }}Свет не изменён. Названия можно скопировать отсюда; ID не нужны.
@@ -443,8 +459,8 @@ actions:
              and this.entity_id not in paused_record.entities)) }}
 
   - if: >-
-      {{ (restore_helper and (not helper_available or not record_valid)) or
-         (not restore_helper and bindings | map(attribute='automations') | sum(start=[]) | count > 0) }}
+      {{ preserve_state and ((restore_helper and (not helper_available or not record_valid)) or
+         (not restore_helper and bindings | map(attribute='automations') | sum(start=[]) | count > 0)) }}
     then:
       - action: persistent_notification.create
         data:
@@ -530,26 +546,38 @@ actions:
         {{ ((paused_record.entities if paused_record and paused_record.room == target_room else [])
             + enabled_automations) | unique | list }}
       next_record: "{{ dict(owner=this.entity_id, room=target_room, entities=restore_entities) }}"
+      outside_automations: >-
+        {{ bindings | rejectattr('name', 'eq', target_room) | map(attribute='automations')
+           | sum(start=[]) | unique | reject('in', room_automations)
+           | reject('eq', this.entity_id) | list }}
+
+  - if: "{{ not preserve_state and outside_automations | count > 0 }}"
+    then:
+      - action: automation.turn_on
+        target:
+          entity_id: "{{ outside_automations }}"
 
   - if: "{{ target_room and room_automations | count > 0 }}"
     then:
-      - if: "{{ next_record | to_json | length > state_attr(restore_helper, 'max') | int(255) }}"
+      - if: "{{ preserve_state }}"
         then:
-          - action: persistent_notification.create
+          - if: "{{ next_record | to_json | length > state_attr(restore_helper, 'max') | int(255) }}"
+            then:
+              - action: persistent_notification.create
+                data:
+                  notification_id: "{{ notification_id }}"
+                  title: "Dreame — список автоматизаций слишком длинный"
+                  message: >-
+                    Журнал не помещается в текстовый помощник. Сократите список
+                    или entity_id автоматизаций. Новые автоматизации не отключены.
+              - stop: Недостаточно места для безопасного восстановления.
+          # Сначала записать исходно включённые, затем отключить. Не сбрасывать журнал
+          # на повторном событии той же комнаты или после перезапуска HA.
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ restore_helper }}"
             data:
-              notification_id: "{{ notification_id }}"
-              title: "Dreame — список автоматизаций слишком длинный"
-              message: >-
-                Журнал не помещается в текстовый помощник. Сократите список
-                или entity_id автоматизаций. Новые автоматизации не отключены.
-          - stop: Недостаточно места для безопасного восстановления.
-      # Сначала записать исходно включённые, затем отключить. Не сбрасывать журнал
-      # на повторном событии той же комнаты или после перезапуска HA.
-      - action: input_text.set_value
-        target:
-          entity_id: "{{ restore_helper }}"
-        data:
-          value: "{{ next_record | to_json }}"
+              value: "{{ next_record | to_json }}"
       - action: automation.turn_off
         target:
           entity_id: "{{ room_automations }}"

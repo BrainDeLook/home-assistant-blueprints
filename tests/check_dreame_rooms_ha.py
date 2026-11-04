@@ -259,7 +259,7 @@ async def main():
     selector(blueprint.inputs['room_bindings']['selector'])(rooms)
     selector(blueprint.inputs['automation_journal']['selector'])('input_text.restore')
     automation.variables = ScriptVariables({**validated['variables'].variables,
-        'configured_rooms': rooms, 'restore_helper': 'input_text.restore'})
+        'configured_rooms': rooms, 'restore_helper': 'input_text.restore', 'preserve_state': True})
     # A newly created input_text has no restored value and reports unknown.
     hass.states.async_set('input_text.restore', 'unknown', {'max': 255})
     hass.states.async_set('automation.motion', 'on')
@@ -339,7 +339,7 @@ async def main():
                         'automations': ['automation.motion'], 'sun_condition': rule}]
         selector(blueprint.inputs['room_bindings']['selector'])(solar_rooms)
         automation.variables = ScriptVariables({**validated['variables'].variables,
-            'configured_rooms': solar_rooms, 'restore_helper': 'input_text.restore'})
+            'configured_rooms': solar_rooms, 'restore_helper': 'input_text.restore', 'preserve_state': True})
         hass.states.async_set('sun.sun', sun)
         update(docked=False, current_segment=6)
         before = len(calls)
@@ -476,6 +476,36 @@ async def main():
     await run()
     assert len(calls) == before and not snapshots
     print('PASS: overlapping group membership and unavailable members cannot corrupt snapshots')
+
+    simple_rooms = [
+        {'room': 'Кухня', 'lights': ['light.kitchen'], 'automations': ['automation.motion', 'automation.shared', 'automation.test']},
+        {'room': 'Офис', 'lights': ['light.office'], 'automations': ['automation.office_motion', 'automation.shared']},
+    ]
+    automation.variables = ScriptVariables({**validated['variables'].variables,
+        'configured_rooms': simple_rooms, 'configured_journal': 'input_text.missing'})
+    hass.states.async_set('automation.motion', 'on')
+    hass.states.async_set('automation.office_motion', 'off')
+    hass.states.async_set('automation.shared', 'on')
+    update(docked=False, current_segment=6)
+    await run()
+    assert hass.states.is_state('automation.motion', 'off')
+    assert hass.states.is_state('automation.office_motion', 'on')
+    assert hass.states.is_state('automation.shared', 'off')
+    assert hass.states.is_state('automation.test', 'on')
+    update(current_segment=1)
+    await run()
+    assert hass.states.is_state('automation.motion', 'on')
+    assert hass.states.is_state('automation.office_motion', 'off')
+    assert hass.states.is_state('automation.shared', 'off')
+    # Simple mode uses current position, not a saved helper or temporary marker.
+    for scene in list(snapshots):
+        hass.states.async_remove(scene)
+    snapshots.clear()
+    update(docked=True)
+    await run()
+    assert all(hass.states.is_state(entity, 'on') for entity in
+               ['automation.motion', 'automation.office_motion', 'automation.shared'])
+    print('PASS: simple helper-free pause/resume, shared automations stay paused in active room; dock resumes all even without scenes')
 
     await automation.async_stop()
     await hass.async_stop(force=True)
