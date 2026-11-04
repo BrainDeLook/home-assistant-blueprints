@@ -150,7 +150,8 @@ blueprint:
             Свет переключится, когда положение робота не меняется это время.
             Короткий скачок в соседнюю комнату игнорируется: прежний свет остаётся.
             После подтверждения старый свет восстанавливается, затем включается
-            новый. 0 — переключать сразу. На базе задержка не применяется.
+            новый. 0 — переключать сразу. При выезде со станции и прибытии
+            на неё задержка не применяется; между комнатами применяется.
           default: 3
           selector:
             number:
@@ -296,9 +297,23 @@ actions:
     then:
       - stop: Изменились только атрибуты датчика, а не его состояние.
 
-  # Единый debounce для комнаты, карты и базы. Любое изменение сбрасывает
-  # отсчёт; база прерывает ожидание сразу. Никаких отмен во время scene/light.
-  - if: "{{ settle_seconds > 0 and state_attr(robot, 'docked') != true }}"
+  # Подтверждённый переход docked true -> false не требует ожидания.
+  # Проверяем актуальность комнаты, чтобы отложенный запуск выезда не пропустил
+  # задержку для другой комнаты, в которую робот успел переехать в очереди.
+  - variables:
+      station_departure: >-
+        {{ trigger.platform == 'state' and trigger.from_state is defined
+           and trigger.to_state is defined and trigger.from_state is not none
+           and trigger.to_state is not none
+           and trigger.from_state.attributes.get('docked') == true
+           and trigger.to_state.attributes.get('docked') == false
+           and state_attr(robot, 'docked') == false
+           and trigger.to_state.attributes.get('current_segment') == state_attr(robot, 'current_segment')
+           and trigger.to_state.attributes.get('selected_map_id') == state_attr(robot, 'selected_map_id') }}
+
+  # Изменение комнаты сбрасывает отсчёт; прибытие на базу прерывает его сразу.
+  # Никаких отмен во время scene/light.
+  - if: "{{ settle_seconds > 0 and state_attr(robot, 'docked') != true and not station_departure }}"
     then:
       - repeat:
           sequence:

@@ -454,6 +454,39 @@ async def main():
         await run()
     print('PASS: only explicit room parameters sent; brightness/temperature combined; keep mode preserves parameters')
 
+    automation.variables = ScriptVariables({**validated['variables'].variables,
+        'settle_seconds': 30,
+        'configured_rooms': [{'room': 'Офис', 'lights': ['light.office']} ]})
+    update(docked=True, current_segment=1)
+    docked_state = hass.states.get('vacuum.robot')
+    update(docked=False)
+    departure_state = hass.states.get('vacuum.robot')
+    await asyncio.wait_for(automation.async_run({
+        'this': hass.states.get('automation.test'),
+        'trigger': {'platform': 'state', 'from_state': docked_state, 'to_state': departure_state},
+    }, Context()), timeout=0.5)
+    assert snapshots and hass.states.is_state('light.office', 'on')
+    update(docked=True)
+    await asyncio.wait_for(run(), timeout=0.5)
+    assert not snapshots and restored('light.office')
+    print('PASS: station departure and arrival bypass 30-second delay')
+
+    automation.variables = ScriptVariables({**validated['variables'].variables,
+        'settle_seconds': 0.15})
+    update(docked=False, current_segment=6)
+    before = len(calls)
+    task = asyncio.create_task(automation.async_run({
+        'this': hass.states.get('automation.test'),
+        'trigger': {'platform': 'state', 'from_state': docked_state, 'to_state': departure_state},
+    }, Context()))
+    await asyncio.sleep(0.05)
+    assert len(calls) == before
+    await task
+    assert hass.states.is_state('light.kitchen', 'on')
+    update(docked=True)
+    await run()
+    print('PASS: stale queued departure cannot bypass delay in another room')
+
     await automation.async_stop()
     await hass.async_stop(force=True)
     print('All checks passed using real HA schemas, templates and script engine; scene/light service endpoints mocked.')
