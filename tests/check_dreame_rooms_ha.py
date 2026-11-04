@@ -27,7 +27,7 @@ async def main():
     inputs = {
         'vacuum': 'vacuum.robot',
         'room_bindings': [
-            {'room': ' КУХНЯ ', 'lights': ['light.kitchen'], 'brightness': 60, 'color': [1, 2, 3]},
+            {'room': ' КУХНЯ ', 'lights': ['light.kitchen'], 'brightness': 60, 'mode': 'rgb', 'color': [1, 2, 3]},
             {'room': 'Офис', 'lights': ['light.office'], 'mode': 'temperature', 'temperature': 2700},
         ],
         'room_delay': 0,
@@ -424,6 +424,35 @@ async def main():
     assert all(hass.states.is_state(entity, 'on') for entity in
                ['automation.motion', 'automation.office_motion', 'automation.shared'])
     print('PASS: simple helper-free pause/resume, shared automations stay paused in active room; dock resumes all even without scenes')
+
+    hass.states.async_set('light.relay', 'off', {'supported_color_modes': ['onoff']})
+    automation.variables = ScriptVariables({**validated['variables'].variables,
+        'configured_rooms': [{'room': 'Офис', 'lights': ['light.relay']}]})
+    update(docked=False, current_segment=1)
+    await run()
+    assert hass.states.is_state('light.relay', 'on')
+    assert dict(hass.states.get('light.relay').attributes) == {'supported_color_modes': ['onoff']}
+    update(docked=True)
+    await run()
+    assert hass.states.is_state('light.relay', 'off')
+    print('PASS: room without settings sends only turn_on to smart relay and restores off')
+
+    for overrides, expected in [
+        ({'brightness': 85}, {'brightness_pct': 85}),
+        ({'mode': 'temperature', 'temperature': 5700}, {'color_temp_kelvin': 5700}),
+        ({'mode': 'temperature', 'temperature': 5700, 'brightness': 100},
+         {'color_temp_kelvin': 5700, 'brightness_pct': 100}),
+        ({'mode': 'keep', 'brightness': 100, 'temperature': 5700}, {}),
+    ]:
+        hass.states.async_set('light.relay', 'off')
+        automation.variables = ScriptVariables({**validated['variables'].variables,
+            'configured_rooms': [{'room': 'Офис', 'lights': ['light.relay'], **overrides}]})
+        update(docked=False, current_segment=1)
+        await run()
+        assert dict(hass.states.get('light.relay').attributes) == expected
+        update(docked=True)
+        await run()
+    print('PASS: only explicit room parameters sent; brightness/temperature combined; keep mode preserves parameters')
 
     await automation.async_stop()
     await hass.async_stop(force=True)

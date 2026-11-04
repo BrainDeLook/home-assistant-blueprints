@@ -5,7 +5,7 @@ blueprint:
     кнопкой добавления и выберите светильники. Названия комнат берите с карты
     приложения Dreame; ID комнат и карты вводить не нужно. В общих настройках
     можно выбрать датчики текущей комнаты и состояния робота. Для каждой комнаты
-    можно задать свой цвет и яркость, а незаполненные настройки берутся из общих.
+    можно задать свой цвет и яркость. Незаданные параметры света не изменяются.
     Свет меняется после подтверждения перехода и восстанавливается при выезде.
     На базе восстанавливается сразу, включая промежуточную мойку.
     Для каждой комнаты можно выбрать автоматизации, временно отключаемые на время
@@ -66,7 +66,7 @@ blueprint:
             Добавляйте комнаты в этот список. Название должно совпадать с картой
             в приложении Dreame; регистр букв и пробелы по краям не важны.
             Можно выбирать отдельные light-сущности и группы ламп. Необязательные поля
-            можно оставить пустыми — применятся общие настройки из раздела 3.
+            можно оставить пустыми — свет просто включится без изменения яркости и цвета.
             Одна и та же лампа, включая участника группы, должна быть только в одной записи.
           default: []
           selector:
@@ -87,8 +87,21 @@ blueprint:
                       multiple: true
                       filter:
                         - domain: light
+                mode:
+                  label: Как менять свет при въезде
+                  selector:
+                    select:
+                      options:
+                        - label: Просто включить — сохранить яркость и цвет
+                          value: keep
+                        - label: Цвет RGB
+                          value: rgb
+                        - label: Температура белого
+                          value: temperature
+                        - label: Яркость — если указана; цвет не менять
+                          value: brightness
                 brightness:
-                  label: Яркость — необязательно
+                  label: "Яркость при въезде — пусто: не менять"
                   selector:
                     number:
                       min: 1
@@ -96,13 +109,19 @@ blueprint:
                       step: 1
                       unit_of_measurement: "%"
                       mode: slider
-                automations:
-                  label: Приостановить автоматизации — необязательно
+                temperature:
+                  label: Температура белого, K — для режима температуры
                   selector:
-                    entity:
-                      multiple: true
-                      filter:
-                        - domain: automation
+                    number:
+                      min: 2000
+                      max: 6500
+                      step: 100
+                      unit_of_measurement: K
+                      mode: slider
+                color:
+                  label: Цвет RGB — для режима RGB
+                  selector:
+                    color_rgb: {}
                 sun_condition:
                   label: Когда включать свет — необязательно, по умолчанию всегда
                   selector:
@@ -114,30 +133,13 @@ blueprint:
                           value: above_horizon
                         - label: Только когда солнце ниже горизонта
                           value: below_horizon
-                mode:
-                  label: Режим света — необязательно
+                automations:
+                  label: Приостановить автоматизации — необязательно
                   selector:
-                    select:
-                      options:
-                        - label: Цвет RGB
-                          value: rgb
-                        - label: Температура белого
-                          value: temperature
-                        - label: Только яркость
-                          value: brightness
-                color:
-                  label: Цвет RGB — необязательно
-                  selector:
-                    color_rgb: {}
-                temperature:
-                  label: Температура белого — необязательно
-                  selector:
-                    number:
-                      min: 2000
-                      max: 6500
-                      step: 100
-                      unit_of_measurement: K
-                      mode: slider
+                    entity:
+                      multiple: true
+                      filter:
+                        - domain: automation
     timing:
       name: "2. Защита от скачков между комнатами"
       icon: mdi:timer-outline
@@ -157,50 +159,6 @@ blueprint:
               step: 1
               unit_of_measurement: s
               mode: box
-    defaults:
-      name: "3. Общий свет — если в комнате не указано своё"
-      icon: mdi:lightbulb-group
-      collapsed: true
-      input:
-        default_brightness:
-          name: Яркость
-          default: 70
-          selector:
-            number:
-              min: 1
-              max: 100
-              step: 1
-              unit_of_measurement: "%"
-              mode: slider
-        default_mode:
-          name: Режим света
-          description: Выберите режим, поддерживаемый вашими светильниками.
-          default: rgb
-          selector:
-            select:
-              options:
-                - label: Цвет RGB
-                  value: rgb
-                - label: Температура белого
-                  value: temperature
-                - label: Только яркость
-                  value: brightness
-        default_color:
-          name: Цвет RGB
-          default: [0, 128, 255]
-          selector:
-            color_rgb: {}
-        default_temperature:
-          name: Температура белого
-          default: 4000
-          selector:
-            number:
-              min: 2000
-              max: 6500
-              step: 100
-              unit_of_measurement: K
-              mode: slider
-
 trigger_variables:
   selected_room_sensor: !input current_room_sensor
   selected_state_sensor: !input robot_state_sensor
@@ -251,14 +209,10 @@ variables:
   sun_entity: !input sun_entity
   configured_rooms: !input room_bindings
   settle_seconds: !input room_delay
-  base_brightness: !input default_brightness
-  base_mode: !input default_mode
-  base_color: !input default_color
-  base_temperature: !input default_temperature
   scene_prefix: "{{ 'dreame_rooms_' ~ this.entity_id.split('.')[1] ~ '_' }}"
   notification_id: "{{ 'dreame_rooms_setup_' ~ this.entity_id.split('.')[1] }}"
-  # Поля формы проверяет object-selector. Здесь один раз подставляются общие
-  # настройки для необязательных полей; далее используется единая структура.
+  # Поля формы проверяет object-selector. Незаданные параметры остаются none:
+  # их не отправляем светильнику. Группы раскрываются в отдельные лампы.
   bindings: >-
     {% set ns = namespace(items=[]) %}
     {% for item in configured_rooms %}
@@ -269,10 +223,10 @@ variables:
         members=expand(item.lights) | map(attribute='entity_id') | list,
         automations=item.get('automations', []),
         sun_condition=item.get('sun_condition', 'always'),
-        brightness=item.get('brightness', base_brightness),
-        mode=item.get('mode', base_mode),
-        color=item.get('color', base_color),
-        temperature=item.get('temperature', base_temperature),
+        brightness=item.get('brightness'),
+        mode=item.get('mode', 'brightness'),
+        color=item.get('color'),
+        temperature=item.get('temperature'),
         snapshot='scene.' ~ scene_prefix ~ loop.index)] %}
     {% endfor %}
     {{ ns.items }}
@@ -318,7 +272,7 @@ actions:
             {% for item in bindings %}
               {% set found = item.name in ns.names %}
             {{ '\n' }}- {{ item.label }}: {{ 'найдена' if found else 'НЕ НАЙДЕНА — проверьте название' }};
-            {{ item.lights | count }} светильников, {{ item.brightness }}%.
+            {{ item.lights | count }} светильников; яркость: {{ (item.brightness ~ '%') if item.brightness is not none else 'не менять' }}; режим: {{ item.mode }}.
             Приостановить: {{ item.automations | join(', ') or 'нет' }}.
             Условие солнца: {{ {'always': 'всегда', 'above_horizon': 'над горизонтом',
                                'below_horizon': 'ниже горизонта'}[item.sun_condition] }}.
@@ -515,12 +469,14 @@ actions:
                         entity_id: "{{ repeat.item.members }}"
                       data: >-
                         {% set item = repeat.item %}
-                        {% if item.mode == 'rgb' %}
-                          {{ dict(brightness_pct=item.brightness, rgb_color=item.color) }}
-                        {% elif item.mode == 'temperature' %}
-                          {{ dict(brightness_pct=item.brightness, color_temp_kelvin=item.temperature) }}
+                        {% set data = dict(brightness_pct=item.brightness)
+                           if item.mode != 'keep' and item.brightness is not none else {} %}
+                        {% if item.mode == 'rgb' and item.color is not none %}
+                          {{ dict(data, rgb_color=item.color) }}
+                        {% elif item.mode == 'temperature' and item.temperature is not none %}
+                          {{ dict(data, color_temp_kelvin=item.temperature) }}
                         {% else %}
-                          {{ dict(brightness_pct=item.brightness) }}
+                          {{ data }}
                         {% endif %}
                   else:
                     - action: scene.delete
