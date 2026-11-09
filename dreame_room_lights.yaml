@@ -7,6 +7,8 @@ blueprint:
     можно выбрать датчики текущей комнаты и состояния робота. Для каждой комнаты
     можно задать свой цвет и яркость. Незаданные параметры света не изменяются.
     Свет меняется после подтверждения перехода и восстанавливается при выезде.
+    Изначально выключенные лампы сначала включаются без изменения настроек для
+    сохранения параметров; при выезде параметры возвращаются перед выключением.
     На базе восстанавливается сразу, включая промежуточную мойку.
     Для каждой комнаты можно выбрать автоматизации, временно отключаемые на время
     присутствия робота. Вне комнаты выбранные автоматизации включены.
@@ -228,7 +230,8 @@ variables:
         mode=item.get('mode', 'brightness'),
         color=item.get('color'),
         temperature=item.get('temperature'),
-        snapshot='scene.' ~ scene_prefix ~ loop.index)] %}
+        snapshot='scene.' ~ scene_prefix ~ loop.index,
+        off_snapshot='scene.' ~ scene_prefix ~ loop.index ~ '_off_parameters')] %}
     {% endfor %}
     {{ ns.items }}
 
@@ -388,9 +391,21 @@ actions:
             {{ (not target_room or repeat.item.name != target_room)
                and state_attr(repeat.item.snapshot, 'entity_id') is not none }}
           then:
+            # Сначала вернуть параметры изначально выключенных ламп, пока они
+            # ещё горят. Обычная сцена off сама цвет и яркость не восстанавливает.
+            - if: "{{ state_attr(repeat.item.off_snapshot, 'entity_id') is not none }}"
+              then:
+                - action: scene.turn_on
+                  target:
+                    entity_id: "{{ repeat.item.off_snapshot }}"
             - action: scene.turn_on
               target:
                 entity_id: "{{ repeat.item.snapshot }}"
+            - if: "{{ state_attr(repeat.item.off_snapshot, 'entity_id') is not none }}"
+              then:
+                - action: scene.delete
+                  target:
+                    entity_id: "{{ repeat.item.off_snapshot }}"
             - action: scene.delete
               target:
                 entity_id: "{{ repeat.item.snapshot }}"
@@ -449,6 +464,9 @@ actions:
           then:
             - variables:
                 light_states: "{{ expand(repeat.item.members) | map(attribute='state') | list }}"
+                initially_off: >-
+                  {{ expand(repeat.item.members) | selectattr('state', 'eq', 'off')
+                     | map(attribute='entity_id') | list }}
                 targets_ready: >-
                   {% set ns = namespace(ready=true) %}
                   {% for light in repeat.item.lights %}
@@ -470,14 +488,57 @@ actions:
                   timeout:
                     seconds: 5
                   continue_on_timeout: false
+                # Получить скрытые при off параметры до применения уборочного
+                # света. Уже включённые лампы здесь не трогаем.
+                - if: >-
+                    {{ initially_off | count > 0 and
+                       [has_value(robot), state_attr(robot, 'current_segment'),
+                        state_attr(robot, 'selected_map_id'), state_attr(robot, 'selected_map'),
+                        state_attr(robot, 'docked'),
+                        states(room_sensor) if room_sensor else none,
+                        states(state_sensor) if state_sensor else none] == confirmed_position }}
+                  then:
+                    - action: light.turn_on
+                      target:
+                        entity_id: "{{ initially_off }}"
+                    - wait_template: >-
+                        {% set ns = namespace(ready=true) %}
+                        {% for light in initially_off %}
+                          {% set modes = state_attr(light, 'supported_color_modes') or ['onoff'] %}
+                          {% set mode = state_attr(light, 'color_mode') %}
+                          {% if not is_state(light, 'on')
+                             or (modes != ['onoff'] and
+                                 (state_attr(light, 'brightness') is none or mode not in modes))
+                             or (mode == 'color_temp' and state_attr(light, 'color_temp_kelvin') is none)
+                             or (mode in ['hs', 'xy', 'rgb', 'rgbw', 'rgbww']
+                                 and state_attr(light, mode ~ '_color') is none) %}
+                            {% set ns.ready = false %}
+                          {% endif %}
+                        {% endfor %}
+                        {{ ns.ready }}
+                      timeout:
+                        seconds: 5
+                      continue_on_timeout: true
+                    - if: "{{ wait.completed }}"
+                      then:
+                        - action: scene.create
+                          data:
+                            scene_id: "{{ repeat.item.off_snapshot.split('.')[1] }}"
+                            snapshot_entities: "{{ initially_off }}"
+                        - wait_template: "{{ state_attr(repeat.item.off_snapshot, 'entity_id') is not none }}"
+                          timeout:
+                            seconds: 5
+                          continue_on_timeout: true
                 # Позиция могла измениться во время асинхронного scene.create.
-                # Тогда свет ещё не менялся: удалить только ненужный снимок.
+                # Проверить позицию ещё раз после получения параметров ламп.
                 - if: >-
                     {{ [has_value(robot), state_attr(robot, 'current_segment'),
                         state_attr(robot, 'selected_map_id'), state_attr(robot, 'selected_map'),
                         state_attr(robot, 'docked'),
                         states(room_sensor) if room_sensor else none,
-                        states(state_sensor) if state_sensor else none] == confirmed_position }}
+                        states(state_sensor) if state_sensor else none] == confirmed_position
+                       and (initially_off | count == 0
+                            or state_attr(repeat.item.off_snapshot, 'entity_id') is not none) }}
                   then:
                     - action: light.turn_on
                       target:
@@ -494,6 +555,16 @@ actions:
                           {{ data }}
                         {% endif %}
                   else:
+                    # Робот уже уехал или лампы не сообщили параметры:
+                    # уборочный цвет не применять, вернуть исходную включённость.
+                    - action: scene.turn_on
+                      target:
+                        entity_id: "{{ repeat.item.snapshot }}"
+                    - if: "{{ state_attr(repeat.item.off_snapshot, 'entity_id') is not none }}"
+                      then:
+                        - action: scene.delete
+                          target:
+                            entity_id: "{{ repeat.item.off_snapshot }}"
                     - action: scene.delete
                       target:
                         entity_id: "{{ repeat.item.snapshot }}"

@@ -10,6 +10,7 @@ from homeassistant.components.automation.config import PLATFORM_SCHEMA
 from homeassistant.components.homeassistant.triggers import state, homeassistant, event
 from homeassistant.components.blueprint.models import Blueprint, BlueprintInputs
 from homeassistant.components.blueprint.schemas import BLUEPRINT_SCHEMA
+from homeassistant.components.light.reproduce_state import async_reproduce_states
 from homeassistant.core import Context, HomeAssistant, State
 from homeassistant.helpers.script import Script
 from homeassistant.helpers.script_variables import ScriptVariables
@@ -57,6 +58,10 @@ async def main():
     calls = []
     notifications = []
     save_delay = 0
+    device_memory = {}
+    probe_delay = 0
+    probe_reports = True
+    probe_started = asyncio.Event()
 
     async def create_scene(call):
         if save_delay:
@@ -70,7 +75,12 @@ async def main():
         entities = call.data['entity_id']
         for entity in [entities] if isinstance(entities, str) else entities:
             for light, state in snapshots[entity].items():
-                hass.states.async_set(light, state.state, dict(state.attributes))
+                if light in device_memory:
+                    # Exercise HA's real off reproduction: it only calls turn_off,
+                    # leaving the lamp's internal color/brightness untouched.
+                    await async_reproduce_states(hass, [state], context=Context())
+                else:
+                    hass.states.async_set(light, state.state, dict(state.attributes))
             calls.append(('restore', entity))
 
     async def delete_scene(call):
@@ -82,10 +92,44 @@ async def main():
     async def light_on(call):
         entities = call.data['entity_id']
         for entity in [entities] if isinstance(entities, str) else entities:
+            if entity in device_memory:
+                attributes = dict(device_memory[entity])
+                data = {key: value for key, value in call.data.items() if key != 'entity_id'}
+                if not data and hass.states.is_state(entity, 'off'):
+                    probe_started.set()
+                    # Simulate a device acknowledging on before its attributes.
+                    hass.states.async_set(entity, 'on', dict(hass.states.get(entity).attributes))
+                    if probe_reports:
+                        hass.loop.call_later(probe_delay, hass.states.async_set, entity, 'on', attributes)
+                    calls.append(('on', entity))
+                    continue
+                if 'brightness_pct' in data:
+                    data['brightness'] = round(data.pop('brightness_pct') * 255 / 100)
+                if 'color_temp_kelvin' in data:
+                    attributes.pop('rgb_color', None)
+                    attributes['color_mode'] = 'color_temp'
+                elif 'rgb_color' in data:
+                    attributes.pop('color_temp_kelvin', None)
+                    attributes['color_mode'] = 'rgb'
+                attributes.update(data)
+                device_memory[entity] = attributes
+                hass.states.async_set(entity, 'on', attributes)
+                calls.append(('on', entity))
+                continue
             attributes = dict(hass.states.get(entity).attributes)
             attributes.update({key: value for key, value in call.data.items() if key != 'entity_id'})
             hass.states.async_set(entity, 'on', attributes)
             calls.append(('on', entity))
+
+    async def light_off(call):
+        entities = call.data['entity_id']
+        for entity in [entities] if isinstance(entities, str) else entities:
+            # OFF hides parameters, but the hardware keeps its latest values.
+            hass.states.async_set(entity, 'off', {
+                'supported_color_modes': device_memory[entity]['supported_color_modes'],
+                'color_mode': None, 'brightness': None,
+            })
+            calls.append(('off', entity))
 
     async def notification(call):
         notifications.append(call.data['message'])
@@ -94,6 +138,7 @@ async def main():
     hass.services.async_register('scene', 'turn_on', restore_scene)
     hass.services.async_register('scene', 'delete', delete_scene)
     hass.services.async_register('light', 'turn_on', light_on)
+    hass.services.async_register('light', 'turn_off', light_off)
     hass.services.async_register('persistent_notification', 'create', notification)
 
     async def automation_on(call):
@@ -367,14 +412,16 @@ async def main():
         'configured_rooms': group_rooms})
     update(docked=False, current_segment=1)
     await run()
-    assert len(snapshots) == 1
-    assert set(next(iter(snapshots.values()))) == set(member_original)
+    assert len(snapshots) == 2
+    assert set(next(value for key, value in snapshots.items() if not key.endswith('_off_parameters'))) == set(member_original)
+    assert set(next(value for key, value in snapshots.items() if key.endswith('_off_parameters'))) == {
+        member for member, previous in member_original.items() if previous.state == 'off'}
     for member in member_original:
         assert hass.states.is_state(member, 'on')
         assert hass.states.get(member).attributes['brightness_pct'] == 100
         assert hass.states.get(member).attributes['color_temp_kelvin'] == 6500
     await run()
-    assert len(snapshots) == 1
+    assert len(snapshots) == 2
     update(docked=True)
     await run()
     assert not snapshots
@@ -486,6 +533,70 @@ async def main():
     update(docked=True)
     await run()
     print('PASS: stale queued departure cannot bypass delay in another room')
+
+    # Regression at the actual HA light-reproduction boundary, with hidden OFF
+    # attributes and separate hardware memory. Both RGB and warm white must
+    # survive cleaning, and an already-on lamp must not be probed.
+    automation.variables = ScriptVariables({**validated['variables'].variables,
+        'configured_rooms': [{'room': 'Офис',
+            'lights': ['light.hidden_white', 'light.hidden_rgb', 'light.already_on'],
+            'mode': 'temperature', 'temperature': 6500, 'brightness': 100}]})
+    device_memory.update({
+        'light.hidden_white': {'supported_color_modes': ['color_temp'],
+            'color_mode': 'color_temp', 'brightness': 37, 'color_temp_kelvin': 2700},
+        'light.hidden_rgb': {'supported_color_modes': ['rgb', 'color_temp'],
+            'color_mode': 'rgb', 'brightness': 81, 'rgb_color': (255, 0, 40)},
+        'light.already_on': {'supported_color_modes': ['color_temp'],
+            'color_mode': 'color_temp', 'brightness': 120, 'color_temp_kelvin': 4100},
+    })
+    hardware_original = copy.deepcopy(device_memory)
+    hass.states.async_set('light.already_on', 'on', device_memory['light.already_on'])
+    for entity in ['light.hidden_white', 'light.hidden_rgb']:
+        hass.states.async_set(entity, 'off', {
+            'supported_color_modes': device_memory[entity]['supported_color_modes'],
+            'color_mode': None, 'brightness': None,
+        })
+    probe_delay = 0.02
+    before = len(calls)
+    update(docked=False, current_segment=1)
+    await run()
+    saved_parameters = next(value for key, value in snapshots.items() if key.endswith('_off_parameters'))
+    assert set(saved_parameters) == {'light.hidden_white', 'light.hidden_rgb'}
+    assert saved_parameters['light.hidden_white'].attributes['color_temp_kelvin'] == 2700
+    assert saved_parameters['light.hidden_rgb'].attributes['rgb_color'] == (255, 0, 40)
+    assert sum(call == ('on', 'light.already_on') for call in calls[before:]) == 1
+    assert all(hass.states.is_state(entity, 'on') for entity in device_memory)
+    assert all(values['color_temp_kelvin'] == 6500 for values in device_memory.values())
+    update(docked=True)
+    await run()
+    assert device_memory == hardware_original
+    assert hass.states.is_state('light.already_on', 'on')
+    assert hass.states.is_state('light.hidden_white', 'off') and hass.states.is_state('light.hidden_rgb', 'off')
+    assert not snapshots
+    print('PASS: real HA light reproduction restores hidden OFF brightness/RGB/temperature before switching off; already-on lamp not probed')
+
+    # Departure during probing must not leave a lamp on or apply cleaning color.
+    probe_started.clear()
+    automation.variables = ScriptVariables({**validated['variables'].variables,
+        'configured_rooms': [{'room': 'Офис', 'lights': ['light.hidden_white'],
+            'mode': 'temperature', 'temperature': 6500, 'brightness': 100}]})
+    update(docked=False, current_segment=1)
+    task = asyncio.create_task(run())
+    await probe_started.wait()
+    update(docked=True)
+    await task
+    assert hass.states.is_state('light.hidden_white', 'off')
+    assert device_memory == hardware_original and not snapshots
+    print('PASS: docking during initial probe rolls back original state without applying cleaning settings')
+
+    # Device acknowledged ON but never reported its settings: do not overwrite
+    # unknown hardware parameters with cleaning settings after the timeout.
+    probe_reports = False
+    update(docked=False, current_segment=1)
+    await run()
+    assert hass.states.is_state('light.hidden_white', 'off')
+    assert device_memory == hardware_original and not snapshots
+    print('PASS: missing probe attributes time out and restore OFF without overwriting hardware parameters')
 
     await automation.async_stop()
     await hass.async_stop(force=True)
